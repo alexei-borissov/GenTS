@@ -16,6 +16,11 @@ from gents.meta import get_attributes
 from gents.mhfdataset import MHFDataset
 from gents.utils import get_version, LOG_LEVEL_IO_WARNING, ProgressBar
 import logging
+from typing import Any
+
+import sys
+sys.path.insert(1, '../real-information/src')
+import real_info
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,30 @@ except ImportError:
     DASK_INSTALLED = False
     logger.debug("Dask not installed. Proceeding in serial.")
 
+
+def is_float_type(x: Any) -> bool:
+    if x is float:
+        return True
+    elif x == "float32":
+        return True
+    elif x == "float64":
+        return True
+    try:
+        return issubclass(x, np.floating)
+    except TypeError:
+        return False
+
+def shave_data(real_info_flag, real_info_tol, input_data, input_dataset, variable):
+    input_dtype = input_dataset.get_var_dtype(variable)
+    if real_info_flag and is_float_type(input_dtype):
+        flat_array = np.asarray(input_data).flatten()
+        bits_to_shave = real_info.pick_bits_to_shave_binary_search(flat_array, len(flat_array), real_info_tol, 0)
+        tmp_data = np.zeros(np.shape(flat_array), dtype=input_dtype)
+        tmp_data = real_info.shave(flat_array, len(flat_array), bits_to_shave)
+        tmp_data = tmp_data.reshape(np.shape(input_data))
+        return tmp_data
+    else:
+        return input_data
 
 def check_timeseries_integrity(ts_path: str):
     """
@@ -44,7 +73,7 @@ def check_timeseries_integrity(ts_path: str):
     return False
 
 
-def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars, complevel=0, compression=None, overwrite=False, reference_structure=None):
+def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars, complevel=0, compression=None, overwrite=False, reference_structure=None, real_info_flag=False, real_info_tol=0.99):
     """
     Creates timeseries dataset from specified history file paths.
 
@@ -107,11 +136,12 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                     for i in range(0, var_shape[0], time_chunk_size):
                         if i + time_chunk_size > var_shape[0]:
                             time_chunk_size = var_shape[0] - i
-                        var_data[i:i + time_chunk_size] = agg_hf_ds.get_var_vals(
-                            primary_var, time_index_start=i, time_index_end=i+time_chunk_size
-                        )
+                        input_data = agg_hf_ds.get_var_vals(primary_var, time_index_start=i, time_index_end=i+time_chunk_size)
+                        var_data[i:i + time_chunk_size] = shave_data(real_info_flag, real_info_tol, input_data, agg_hf_ds, primary_var)
+
                 else:
-                    var_data[:] = agg_hf_ds.get_var_vals(primary_var)
+                    input_data = agg_hf_ds.get_var_vals(primary_var)
+                    var_data[:] = shave_data(real_info_flag, real_info_tol, input_data, agg_hf_ds, primary_var)
 
             for secondary_var in secondary_vars_data:
                 var_shape = agg_hf_ds.get_var_data_shape(secondary_var)
@@ -122,7 +152,10 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                         if dim == "time":
                             ts_ds.createDimension(dim, None)
                         else:
-                            ts_ds.createDimension(dim, var_shape[index])
+                            try:
+                                ts_ds.createDimension(dim, var_shape[index])
+                            except:    # XXX: for some reason some of the shapes are just integers in the short run that I did.
+                                ts_ds.createDimension(dim, var_shape)
                 
                 svar_data = ts_ds.createVariable(secondary_var,
                                                 agg_hf_ds.get_var_dtype(secondary_var),
@@ -135,7 +168,9 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                 svar_data.set_always_mask(False)
 
                 ts_ds[secondary_var].setncatts(agg_hf_ds.get_var_attrs(secondary_var))
-                svar_data[:] = secondary_vars_data[secondary_var]
+                #svar_data[:] = secondary_vars_data[secondary_var]
+                input_data = secondary_vars_data[secondary_var]
+                svar_data[:] = shave_data(real_info_flag, real_info_tol, input_data, agg_hf_ds, secondary_var)
             
             ts_ds.setncatts(global_attrs | {"gents_version": str(get_version())})
     return ts_out_path
