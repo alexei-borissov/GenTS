@@ -6,8 +6,9 @@ Handles real information compression and bit shaving for floating-point data.
 """
 import numpy as np
 import sys
+import yaml
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # Add path to access the real_info module from real-information package
 sys.path.insert(1, str(Path(__file__).parent.parent.parent / 'real-information' / 'src'))
@@ -22,15 +23,23 @@ class RealInfoProcessor:
     data while preserving real information based on a specified tolerance.
     """
     
-    def __init__(self, real_info_flag: bool = False, real_info_tol: float = 0.99):
+    def __init__(self, config_path: Optional[str] = None):
         """
         Initialize the RealInfoProcessor.
         
-        :param real_info_flag: Whether to enable real information compression
-        :param real_info_tol: Tolerance threshold for information preservation (0-1)
+        :param config_path: Path to YAML configuration file containing real info settings
         """
-        self.real_info_flag = real_info_flag
-        self.real_info_tol = real_info_tol
+        if config_path is not None:
+            # Load configuration from YAML file
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            
+            self.real_info_flag = config.get('use_real_info', False)
+            self.real_info_tol = config.get('default_real_info', 0.99)
+        else:
+            # Use provided parameters (backward compatibility)
+            self.real_info_flag = False
+            self.real_info_tol =  0.99
     
     @staticmethod
     def is_float_type(x: Any) -> bool:
