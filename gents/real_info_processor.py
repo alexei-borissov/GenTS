@@ -36,6 +36,14 @@ class RealInfoProcessor:
             
             self.real_info_flag = config.get('use_real_info', False)
             self.real_info_tol = config.get('default_real_info', 0.99)
+            self.real_info_per_variable = {}
+            for var in config["variables"]:
+                var_name = var.get("var_name")
+                var_tol = var.get("real_info", self.real_info_tol)
+                self.real_info_per_variable[var_name] = var_tol
+
+            #print(f"using real info: {self.real_info_flag}")
+            #print(f"real info processor intialized with config: {config}")
         else:
             # Use provided parameters (backward compatibility)
             self.real_info_flag = False
@@ -75,21 +83,17 @@ class RealInfoProcessor:
         input_dtype = input_dataset.get_var_dtype(variable)
         
         if self.real_info_flag and self.is_float_type(input_dtype):
-            # Flatten array for processing
             flat_array = np.asarray(input_data).flatten()
+
+            shave_tolerance = self.real_info_tol
+
+            if variable in self.real_info_per_variable:
+                shave_tolerance = self.real_info_per_variable[variable]
             
-            # Determine number of bits to shave
-            bits_to_shave = real_info.pick_bits_to_shave_binary_search(
-                flat_array, 
-                len(flat_array), 
-                self.real_info_tol, 
-                0
-            )
+            bits_to_shave = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, 0)
             
-            # Shave the bits
             tmp_data = real_info.shave(flat_array, len(flat_array), bits_to_shave)
             
-            # Reshape back to original shape
             tmp_data = tmp_data.reshape(np.shape(input_data))
             return tmp_data
         else:

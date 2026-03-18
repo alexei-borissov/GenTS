@@ -50,7 +50,7 @@ def check_timeseries_integrity(ts_path: str):
     return False
 
 
-def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars, complevel=0, compression=None, overwrite=False, reference_structure=None, real_info_config_path=None):
+def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars, complevel=0, compression=None, overwrite=False, reference_structure=None, real_info_processor=None):
     """
     Creates timeseries dataset from specified history file paths.
 
@@ -66,7 +66,10 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
     """
 
     # Initialize the RealInfoProcessor
-    real_info_processor = RealInfoProcessor(real_info_config_path)
+    #if (real_info_processor is None):
+    #    real_info_processor = RealInfoProcessor()
+    
+    #print(f"real info processor initialized with real_info_flag: {real_info_processor.real_info_flag} and real_info_tol: {real_info_processor.real_info_tol}")
     
     ts_out_path = None
     with MHFDataset(hf_paths) as agg_hf_ds:
@@ -172,7 +175,10 @@ class TSCollection:
             self.__dask_client = dask_client
         
         # Initialize the RealInfoProcessor with the provided parameters
+        #print(f"ts collection initializing with real_info_config_path: {real_info_config_path}")
+        self.__real_info_config_path = real_info_config_path
         self.__real_info_processor = RealInfoProcessor(config_path=real_info_config_path)
+        #print(f"ts collection real info processor initialized with real_info_flag: {self.__real_info_processor.real_info_flag} and real_info_tol: {self.__real_info_processor.real_info_tol}")
         
         hf_collection.sort_along_time()
 
@@ -254,7 +260,7 @@ class TSCollection:
         if dask_client is None:
             dask_client = self.__dask_client
 
-        return TSCollection(hf_collection=hf_collection, output_dir=output_dir, ts_orders=ts_orders, dask_client=dask_client, real_info_config_path=None)
+        return TSCollection(hf_collection=hf_collection, output_dir=output_dir, ts_orders=ts_orders, dask_client=dask_client, real_info_config_path=self.__real_info_config_path)
 
     def include(self, path_glob, var_glob="*"):
         """
@@ -298,7 +304,7 @@ class TSCollection:
         logger.debug(f"Exclusive filter(s) applied: '{var_glob}' to history files matching '{path_glob}'")
         return self.copy(ts_orders=filtered_orders)
 
-    def add_args(self, path_glob="*", var_glob="*", level=None, alg=None, overwrite=None, real_info_config_path=None):
+    def add_args(self, path_glob="*", var_glob="*", level=None, alg=None, overwrite=None):
         """
         Applies arguments to pass to generate_time_series when processing time series orders.
         Filters specify which time series orders should be updated. If value is None, then the
@@ -319,6 +325,7 @@ class TSCollection:
                     path_matched = True
                     break
             
+            print(f"order_dict: {order_dict} var_glob: {var_glob}")
             if path_matched and fnmatch.fnmatch(order_dict["primary_var"], var_glob):
                 if level is not None:
                     order_dict["complevel"] = level
@@ -326,12 +333,9 @@ class TSCollection:
                     order_dict["compression"] = alg
                 if overwrite is not None:
                     order_dict["overwrite"] = overwrite
-                if real_info_config_path is not None:
-                    order_dict["real_info_config_path"] = real_info_config_path
             new_orders.append(order_dict)
 
-        #logger.debug(f"Arguments applied (excluding None): ['level': {level}, 'alg': {alg}, 'overwrite': {overwrite}] to history files matching '{path_glob}' and variables matching '{var_glob}'.")
-        logger.debug(f"Arguments applied (excluding None): ['level': {level}, 'alg': {alg}, 'overwrite': {overwrite}, 'real_info_config_path': {real_info_config_path}] to history files matching '{path_glob}' and variables matching '{var_glob}'.")
+        logger.debug(f"Arguments applied (excluding None): ['level': {level}, 'alg': {alg}, 'overwrite': {overwrite}] to history files matching '{path_glob}' and variables matching '{var_glob}'.")
         return self.copy(ts_orders=new_orders)
 
     def apply_path_swap(self, string_match, string_swap, path_glob="*", var_glob="*"):
@@ -368,18 +372,6 @@ class TSCollection:
         :return: A new TSCollection that includes time series orders with arguments applied.
         """
         return self.add_args(path_glob=path_glob, var_glob=var_glob, level=level, alg=alg)
-
-    def apply_real_info(self, real_info_config_path, path_glob, var_glob="*"):
-        """
-        Applies compression arguments to time series orders.
-
-        :param level: Level of compresison to pass to the netCDF4 backend.
-        :param alg: Compression algorithm to pass to the netCDF4 backend.
-        :param path_glob: Glob pattern to match to source history files.
-        :param var_glob: Glob pattern to match to primary variable names. Defaults to "*".
-        :return: A new TSCollection that includes time series orders with arguments applied.
-        """
-        return self.add_args(path_glob=path_glob, var_glob=var_glob, real_info_config_path=real_info_config_path)
 
     def apply_overwrite(self, path_glob, var_glob="*"):
         """
@@ -425,6 +417,9 @@ class TSCollection:
             logger.info("No Dask client detected... proceeding in serial.")
             prog_bar = ProgressBar(total=len(self.__orders))
             for args in self.__orders:
+                args["real_info_processor"] = self.__real_info_processor
+                #print(f"using real info processor with real_info_flag: {args['real_info_processor'].real_info_flag} and real_info_tol: {args['real_info_processor'].real_info_tol} for time series generation")
+                #print(f"generate_time_series args: {args}")
                 results.append(generate_time_series(**args))
                 prog_bar.step()
         else:
