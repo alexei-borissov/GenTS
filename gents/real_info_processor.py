@@ -68,7 +68,7 @@ class RealInfoProcessor:
         except TypeError:
             return False
     
-    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str) -> np.ndarray:
+    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, time_chunk_size = 1) -> (np.ndarray, np.int32):
         """
         Apply real information-based bit shaving to input data.
         
@@ -80,6 +80,10 @@ class RealInfoProcessor:
         :param variable: Name of the variable being processed
         :return: Shaved data array (or original data if shaving is disabled or data is non-float)
         """
+        # If we're going to be shaving data it must be on a per-snapshot basis. 
+        # Note: if parameter isn't passed, it is assumed a time-independent variable is passed in, hence no need to check.
+        assert(time_chunk_size == 1) 
+
         input_dtype = input_dataset.get_var_dtype(variable)
         
         if self.real_info_flag and self.is_float_type(input_dtype):
@@ -95,6 +99,6 @@ class RealInfoProcessor:
             tmp_data = real_info.shave(flat_array, len(flat_array), bits_to_shave)
             
             tmp_data = tmp_data.reshape(np.shape(input_data))
-            return tmp_data
+            return tmp_data, bits_to_shave
         else:
-            return input_data
+            return input_data, np.int32(0)

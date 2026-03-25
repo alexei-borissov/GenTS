@@ -94,6 +94,7 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
             else:
                 remove(ts_out_path)
 
+        bits_shaved = 0
         with netCDF4.Dataset(ts_out_path, mode="w") as ts_ds:
             if primary_var is not None:
                 var_shape = agg_hf_ds.get_var_data_shape(primary_var)
@@ -116,16 +117,21 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                 ts_ds[primary_var].setncatts(agg_hf_ds.get_var_attrs(primary_var))
 
                 time_chunk_size = 1
+                bits_shaved = []
                 if len(var_shape) > 0 and "time" in var_dims:
-                    for i in range(0, var_shape[0], time_chunk_size):
+                    #for i in range(0, var_shape[0], time_chunk_size):
+                    for i in range(1):  # Temporarily only do one loop iteration for debugging
                         if i + time_chunk_size > var_shape[0]:
                             time_chunk_size = var_shape[0] - i
                         input_data = agg_hf_ds.get_var_vals(primary_var, time_index_start=i, time_index_end=i+time_chunk_size)
-                        var_data[i:i + time_chunk_size] = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var)
+                        var_data[i:i + time_chunk_size], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, time_chunk_size)
+                        bits_shaved.append(shaved)
 
                 else:
                     input_data = agg_hf_ds.get_var_vals(primary_var)
-                    var_data[:] = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var)
+                    var_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var)
+
+                ts_ds[primary_var].setncattr("bits_shaved", np.asarray(bits_shaved, dtype=np.int32)) # Want to move this to a secondary variable rather than attribute.
 
             for secondary_var in secondary_vars_data:
                 var_shape = agg_hf_ds.get_var_data_shape(secondary_var)
@@ -153,7 +159,8 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
 
                 ts_ds[secondary_var].setncatts(agg_hf_ds.get_var_attrs(secondary_var))
                 input_data = secondary_vars_data[secondary_var]
-                svar_data[:] = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var)
+                svar_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var)
+                ts_ds[secondary_var].setncattr("bits_shaved", np.int32(bits_shaved))
             
             ts_ds.setncatts(global_attrs | {"gents_version": str(get_version())})
     return ts_out_path
@@ -325,14 +332,17 @@ class TSCollection:
                     path_matched = True
                     break
             
-            print(f"order_dict: {order_dict} var_glob: {var_glob}")
-            if path_matched and fnmatch.fnmatch(order_dict["primary_var"], var_glob):
-                if level is not None:
-                    order_dict["complevel"] = level
-                if alg is not None:
-                    order_dict["compression"] = alg
-                if overwrite is not None:
-                    order_dict["overwrite"] = overwrite
+            #print(f"order_dict: {order_dict} var_glob: {var_glob}")
+            #if path_matched and fnmatch.fnmatch(order_dict["primary_var"], var_glob):
+            if path_matched:
+                if (order_dict["primary_var"] is not None):
+                    if fnmatch.fnmatch(order_dict["primary_var"], var_glob):
+                        if level is not None:
+                            order_dict["complevel"] = level
+                        if alg is not None:
+                            order_dict["compression"] = alg
+                        if overwrite is not None:
+                            order_dict["overwrite"] = overwrite
             new_orders.append(order_dict)
 
         logger.debug(f"Arguments applied (excluding None): ['level': {level}, 'alg': {alg}, 'overwrite': {overwrite}] to history files matching '{path_glob}' and variables matching '{var_glob}'.")
