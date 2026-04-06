@@ -41,6 +41,8 @@ class RealInfoProcessor:
                 var_name = var.get("var_name")
                 var_tol = var.get("real_info", self.real_info_tol)
                 self.real_info_per_variable[var_name] = var_tol
+            self.real_info_eval_freq = config.get('real_info_eval_freq', 1)
+            self.bits_to_shave = {}
 
             #print(f"using real info: {self.real_info_flag}")
             #print(f"real info processor intialized with config: {config}")
@@ -68,7 +70,7 @@ class RealInfoProcessor:
         except TypeError:
             return False
     
-    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, time_chunk_size = 1) -> (np.ndarray, np.int32):
+    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, timestep: int, time_chunk_size = 1) -> (np.ndarray, np.int32):
         """
         Apply real information-based bit shaving to input data.
         
@@ -78,6 +80,7 @@ class RealInfoProcessor:
         :param input_data: Input data array to be shaved
         :param input_dataset: Dataset object containing metadata (must have get_var_dtype method)
         :param variable: Name of the variable being processed
+        :param timestep: Current timestep
         :return: Shaved data array (or original data if shaving is disabled or data is non-float)
         """
         # If we're going to be shaving data it must be on a per-snapshot basis. 
@@ -93,12 +96,16 @@ class RealInfoProcessor:
 
             if variable in self.real_info_per_variable:
                 shave_tolerance = self.real_info_per_variable[variable]
+
+            if variable not in self.bits_to_shave:
+                self.bits_to_shave[variable] = 0
             
-            bits_to_shave = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, 0)
+            if timestep % self.real_info_eval_freq == 0:
+                self.bits_to_shave[variable] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[variable])
             
-            tmp_data = real_info.shave(flat_array, len(flat_array), bits_to_shave)
+            tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[variable])
             
             tmp_data = tmp_data.reshape(np.shape(input_data))
-            return tmp_data, bits_to_shave
+            return tmp_data, self.bits_to_shave[variable]
         else:
             return input_data, np.int32(0)

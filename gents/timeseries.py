@@ -65,12 +65,6 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
     :return: List of paths to time series generated.
     """
 
-    # Initialize the RealInfoProcessor
-    #if (real_info_processor is None):
-    #    real_info_processor = RealInfoProcessor()
-    
-    #print(f"real info processor initialized with real_info_flag: {real_info_processor.real_info_flag} and real_info_tol: {real_info_processor.real_info_tol}")
-    
     ts_out_path = None
     with MHFDataset(hf_paths) as agg_hf_ds:
         global_attrs = agg_hf_ds.get_global_attrs()
@@ -119,13 +113,11 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                 time_chunk_size = 1
                 bits_shaved = []
                 if len(var_shape) > 0 and "time" in var_dims:
-                    #for i in range(0, var_shape[0], time_chunk_size):
-                    for i in range(1):  # Temporarily only do one loop iteration for debugging
+                    for i in range(0, var_shape[0], time_chunk_size):
                         if i + time_chunk_size > var_shape[0]:
                             time_chunk_size = var_shape[0] - i
                         input_data = agg_hf_ds.get_var_vals(primary_var, time_index_start=i, time_index_end=i+time_chunk_size)
-                        var_data[i:i + time_chunk_size], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, time_chunk_size)
-                        bits_shaved.append(shaved)
+                        var_data[i:i + time_chunk_size], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, i, time_chunk_size)
 
                 else:
                     input_data = agg_hf_ds.get_var_vals(primary_var)
@@ -159,7 +151,7 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
 
                 ts_ds[secondary_var].setncatts(agg_hf_ds.get_var_attrs(secondary_var))
                 input_data = secondary_vars_data[secondary_var]
-                svar_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var)
+                svar_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var, 0)
                 ts_ds[secondary_var].setncattr("bits_shaved", np.int32(bits_shaved))
             
             ts_ds.setncatts(global_attrs | {"gents_version": str(get_version())})
