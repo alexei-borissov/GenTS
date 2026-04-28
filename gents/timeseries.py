@@ -65,6 +65,7 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
     :return: List of paths to time series generated.
     """
 
+    variables_list = ["T", "U", "V", "PRECC", "PRECL", "PSL", "TREFHT", "TREFHTMN"] #, "TREFHTMX", "TS", "FSNT", "FLNT", "FSNS", "FLNS"]
     ts_out_path = None
     with MHFDataset(hf_paths) as agg_hf_ds:
         global_attrs = agg_hf_ds.get_global_attrs()
@@ -90,7 +91,8 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
 
         bits_shaved = 0
         with netCDF4.Dataset(ts_out_path, mode="w") as ts_ds:
-            if primary_var is not None:
+            #if primary_var is not None:
+            if primary_var in variables_list:    # XXX: debugging
                 var_shape = agg_hf_ds.get_var_data_shape(primary_var)
                 var_dims = agg_hf_ds.get_var_dimensions(primary_var)
                 for index, dim in enumerate(var_dims):
@@ -113,7 +115,8 @@ def generate_time_series(hf_paths, ts_path_template, primary_var, secondary_vars
                 time_chunk_size = 1
                 bits_shaved = []
                 if len(var_shape) > 0 and "time" in var_dims:
-                    for i in range(0, var_shape[0], time_chunk_size):
+                    #for i in range(0, var_shape[0], time_chunk_size):
+                    for i in range(0, min(var_shape[0], 10), time_chunk_size): # XXX: debugging
                         if i + time_chunk_size > var_shape[0]:
                             time_chunk_size = var_shape[0] - i
                         input_data = agg_hf_ds.get_var_vals(primary_var, time_index_start=i, time_index_end=i+time_chunk_size)
@@ -417,11 +420,9 @@ class TSCollection:
         results = []
         if self.__dask_client is None:
             logger.info("No Dask client detected... proceeding in serial.")
-            prog_bar = ProgressBar(total=len(self.__orders))
+            prog_bar = ProgressBar(total=len(self.__orders), write_progress=False)
             for args in self.__orders:
                 args["real_info_processor"] = self.__real_info_processor
-                #print(f"using real info processor with real_info_flag: {args['real_info_processor'].real_info_flag} and real_info_tol: {args['real_info_processor'].real_info_tol} for time series generation")
-                #print(f"generate_time_series args: {args}")
                 results.append(generate_time_series(**args))
                 prog_bar.step()
         else:

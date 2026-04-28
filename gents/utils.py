@@ -57,7 +57,7 @@ def enable_logging(verbose=False, output_path=None):
 
 
 class ProgressBar:
-    def __init__(self, total, length=40):
+    def __init__(self, total, length=40, write_progress=True):
         """
         Progress bar for visualizing various processes throughout the package.
 
@@ -68,18 +68,22 @@ class ProgressBar:
         self.length = length
         self.start_time = time()
         self.count = 0
+        self.write_progress = write_progress
 
     def step(self):
         """Update the progress bar by a given step."""
         self.count += 1
+        if self.count == self.total:
+            self.write_progress = True  # Force write progress on final step to ensure 100% is printed
         percent = self.count / self.total
         filled_length = int(self.length * percent)
         bar = "█" * filled_length + "-" * (self.length - filled_length)
         elapsed = time() - self.start_time
-        sys.stdout.write(
-            f"\r|{bar}| {percent:6.2%}  {self.count}/{self.total}  Elapsed: {elapsed:5.1f}s"
-        )
-        sys.stdout.flush()
+        if (self.write_progress):
+            sys.stdout.write(
+                f"\r|{bar}| {percent:6.2%}  {self.count}/{self.total}  Elapsed: {elapsed:5.1f}s"
+            )
+            sys.stdout.flush()
 
         if self.count >= self.total:
             sys.stdout.write("\n")
