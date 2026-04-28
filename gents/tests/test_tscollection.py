@@ -1,12 +1,10 @@
 from gents.tests.test_cases import *
 from gents.hfcollection import HFCollection, find_files
-from gents.datastore import GenTSDataStore
 from gents.timeseries import *
-from os.path import isfile, getsize, isdir
+from os.path import isfile, getsize
 from os import listdir, remove, makedirs
+from netCDF4 import Dataset
 from shutil import rmtree
-from cftime import num2date
-import warnings
 
 
 def clear_output_dir(output_dir):
@@ -19,7 +17,6 @@ def clear_output_dir(output_dir):
 
 
 def test_clear_output_dir(tmp_path_factory):
-    """Validates the clear_output_dir() helper deletes all files and subdirectories."""
     output_dir = tmp_path_factory.mktemp("output")
     for i in range(5):
         makedirs(f"{output_dir}/{i}/")
@@ -33,32 +30,27 @@ def test_clear_output_dir(tmp_path_factory):
 
 
 def test_generate_time_series(simple_case):
-    """generate_time_series() produces a complete TS file with correct time size, variable values, and secondary vars; re-running with compression produces a smaller file."""
+    """This does not test TSCollection, but the primary function it relies on."""
     input_head_dir, output_head_dir = simple_case
     hf_paths = [f"{input_head_dir}/{name}" for name in listdir(input_head_dir)]
 
     var_name = "VAR1"
-    ts_args = {f"{var_name}": {"ts_string": "test", "complevel": 0, "compression": None, "overwrite": False}}
-    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", ["time", "time_bounds"], ts_args)[0]
+    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", var_name, ["time", "time_bounds"], complevel=0, compression=None, overwrite=False)
     
     assert isfile(ts_path)
     assert check_timeseries_integrity(ts_path)
 
-    with GenTSDataStore(ts_path, 'r') as ts_ds:
+    with Dataset(ts_path, 'r') as ts_ds:
         assert ts_ds["time"][:].size == len(hf_paths)
         
         for index in range(len(hf_paths)):
-            with GenTSDataStore(hf_paths[index], 'r') as hf_ds:
+            with Dataset(hf_paths[index], 'r') as hf_ds:
                 assert (ts_ds[var_name][:][index] == hf_ds[var_name][:]).all()
         assert "time" in ts_ds.variables
         assert "time_bounds" in ts_ds.variables
 
     original_size = getsize(ts_path)
-
-    ts_args[var_name]["complevel"] = 9
-    ts_args[var_name]["compression"] = "zlib"
-    ts_args[var_name]["overwrite"] = True
-    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", ["time", "time_bounds"], ts_args)[0]
+    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", var_name, ["time", "time_bounds"], complevel=9, compression="zlib", overwrite=True)
 
     assert getsize(ts_path) < original_size
     assert len(listdir(output_head_dir)) == 1
@@ -66,29 +58,16 @@ def test_generate_time_series(simple_case):
 
 
 def test_integrity_check(simple_case):
-    """check_timeseries_integrity() returns True for GenTS-generated TS files and False for raw history files."""
     input_head_dir, output_head_dir = simple_case
     hf_paths = [f"{input_head_dir}/{name}" for name in listdir(input_head_dir)]
 
-    ts_args = {"VAR1": {"ts_string": "test"}}
-    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", ["time", "time_bounds"], ts_args)[0]
+    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", "VAR1", ["time", "time_bounds"])
     assert check_timeseries_integrity(ts_path)
     for path in hf_paths:
         assert not check_timeseries_integrity(path)
 
 
-def test_conform_check(simple_case):
-    """check_timeseries_conform() returns True for a freshly generated TS file."""
-    input_head_dir, output_head_dir = simple_case
-    hf_paths = [f"{input_head_dir}/{name}" for name in listdir(input_head_dir)]
-
-    ts_args = {"VAR1": {"ts_string": "test"}}
-    ts_path = generate_time_series(hf_paths, f"{output_head_dir}/test_ts.", ["time", "time_bounds"], ts_args)[0]
-    assert check_timeseries_conform(ts_path)
-
-
 def test_tscollection_copy(simple_case):
-    """All TSCollection modifier operations return new instances distinct from the original."""
     input_head_dir, output_head_dir = simple_case
     hf_collection = HFCollection(input_head_dir)
     ts_collection = TSCollection(hf_collection, output_head_dir)
@@ -130,7 +109,7 @@ def test_tscollection_copy(simple_case):
     
 
 def test_tscollection_compression(simple_case):
-    """Applying zlib compression at level 9 produces smaller output files than the uncompressed default."""
+    """Assumes default compression is 0."""
     input_head_dir, output_head_dir = simple_case
     hf_collection = HFCollection(input_head_dir)
     ts_collection = TSCollection(hf_collection, output_head_dir)
@@ -155,7 +134,12 @@ def test_tscollection_compression(simple_case):
 
 
 def test_tscollection_overwrite(simple_case):
-    """Overwriting existing files with compressed settings produces smaller files than the originals."""
+    """
+    To test the overwrite function, we write uncompressed and then overwrite with compressed.
+
+    Since this entangles overwrite with compression, check if `test_tscollection_compression`
+    passes, as it purely tests compression. 
+    """
     input_head_dir, output_head_dir = simple_case
     hf_collection = HFCollection(input_head_dir)
     ts_collection = TSCollection(hf_collection, output_head_dir)
@@ -176,237 +160,12 @@ def test_tscollection_overwrite(simple_case):
 
 
 def test_tscollection_filters(structured_case):
-    """TSCollection exclude() reduces output count; include() reduces it further; both are less than unfiltered."""
     input_head_dir, output_head_dir = structured_case
     hf_collection = HFCollection(input_head_dir)
     ts_collection = TSCollection(hf_collection, output_head_dir)
 
     ts_collection.execute()
+
     unfiltered_num_files = len(find_files(output_head_dir, "*"))
-    clear_output_dir(output_head_dir)
 
-    ts_collection.exclude("*/1_dir/*").execute()
-    exclude_num_files = len(find_files(output_head_dir, "*"))
-    clear_output_dir(output_head_dir)
-
-    ts_collection.include("*/1_dir/*").execute()
-    include_num_files = len(find_files(output_head_dir, "*"))
-
-    assert unfiltered_num_files > exclude_num_files
-    assert exclude_num_files > include_num_files
-    assert include_num_files > 0
-
-
-def test_ts_collection_path_swapping(structured_case):
-    """apply_path_swap() redirects output files to the substituted directory path."""
-    input_head_dir, output_head_dir = structured_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-
-    ts_collection.apply_path_swap("/0_subdir/", "/proc/tseries/").execute()
-    assert isdir(f"{output_head_dir}/0_dir/proc/tseries/")
-    assert len(listdir(f"{output_head_dir}/0_dir/proc/tseries/")) == STRUCTURED_NUM_TEST_HIST_FILES
-
-    clear_output_dir(output_head_dir)
-
-    ts_collection.apply_path_swap("dir", "folder").execute()
-    assert isdir(f"{output_head_dir}/0_folder/0_subfolder/")
-    assert len(listdir(output_head_dir)) == STRUCTURED_NUM_DIRS
-    for top_dir in listdir(output_head_dir):
-        assert len(listdir(f"{output_head_dir}/{top_dir}")) == STRUCTURED_NUM_SUBDIRS
-        for sub_dir in listdir(f"{output_head_dir}/{top_dir}/"):
-            assert len(listdir(f"{output_head_dir}/{top_dir}/{sub_dir}")) == STRUCTURED_NUM_VARS
-
-
-def test_ts_collection_append_timestep_dirs(mixed_timestep_case):
-    """append_timestep_dirs() creates hour_1, day_1, month_1, and year_1 subdirectories for mixed-frequency inputs."""
-    input_head_dir, output_head_dir = mixed_timestep_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-
-    ts_collection.append_timestep_dirs().execute()
-    
-    assert isdir(f"{output_head_dir}/hour_1")
-    assert isdir(f"{output_head_dir}/day_1")
-    assert isdir(f"{output_head_dir}/month_1")
-    assert isdir(f"{output_head_dir}/year_1")
-
-    assert len(listdir(f"{output_head_dir}/hour_1")) == SIMPLE_NUM_VARS
-    assert len(listdir(f"{output_head_dir}/day_1")) == SIMPLE_NUM_VARS
-    assert len(listdir(f"{output_head_dir}/month_1")) == SIMPLE_NUM_VARS
-    assert len(listdir(f"{output_head_dir}/year_1")) == SIMPLE_NUM_VARS
-
-
-def compare_timestr(hf_collection, ts_paths, timestep, time_format):
-    with GenTSDataStore(list(hf_collection)[0], 'r') as hf_ds:
-        units = hf_ds["time"].units
-        calendar = hf_ds["time"].calendar
-        start_time = hf_ds["time"][:][0]
-
-    start_date = num2date(start_time, units=units, calendar=calendar)
-    end_date = num2date(start_time+timestep*(len(hf_collection)-1), units=units, calendar=calendar)
-
-    for path in ts_paths:
-        time_str = path.split(".")[-2]
-        assert "-" in time_str
-        assert len(time_str.split("-")) == 2
-        assert time_str == f"{start_date.strftime(time_format)}-{end_date.strftime(time_format)}"
-
-
-def test_simple_3hourly_case_timestr(simple_3hourly_case):
-    """3-hourly TS filenames use the ``%Y%m%d%H`` timestamp format."""
-    input_head_dir, output_head_dir = simple_3hourly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-    compare_timestr(hf_collection, ts_paths, 3/24, "%Y%m%d%H")
-
-
-def test_simple_6hourly_case_timestr(simple_6hourly_case):
-    """6-hourly TS filenames use the ``%Y%m%d%H`` timestamp format."""
-    input_head_dir, output_head_dir = simple_6hourly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-    compare_timestr(hf_collection, ts_paths, 6/24, "%Y%m%d%H")
-
-
-def test_simple_daily_case_timestr(simple_daily_case):
-    """Daily TS filenames use the ``%Y%m%d`` timestamp format."""
-    input_head_dir, output_head_dir = simple_daily_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-    compare_timestr(hf_collection, ts_paths, 1, "%Y%m%d")
-
-
-def test_simple_monthly_case_timestr(simple_monthly_case):
-    """Monthly TS filenames use the ``%Y%m`` timestamp format."""
-    input_head_dir, output_head_dir = simple_monthly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-    compare_timestr(hf_collection, ts_paths, 30, "%Y%m")
-
-
-def test_simple_yearly_case_timestr(simple_yearly_case):
-    """Yearly TS filenames use the ``%Y`` timestamp format."""
-    input_head_dir, output_head_dir = simple_yearly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-    compare_timestr(hf_collection, ts_paths, 365, "%Y")
-
-
-def test_simple_6hourly_case_timestr_dir(simple_6hourly_case):
-    """append_timestep_dirs() creates an ``hour_6`` subdirectory for 6-hourly inputs."""
-    input_head_dir, output_head_dir = simple_6hourly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir).append_timestep_dirs()
-    ts_paths = ts_collection.execute()
-    assert "hour_6" in listdir(output_head_dir)
-
-
-def test_simple_3hourly_case_timestr_dir(simple_3hourly_case):
-    """append_timestep_dirs() creates an ``hour_3`` subdirectory for 3-hourly inputs."""
-    input_head_dir, output_head_dir = simple_3hourly_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir).append_timestep_dirs()
-    ts_paths = ts_collection.execute()
-    assert "hour_3" in listdir(output_head_dir)
-
-
-def test_chunking(large_file_for_chunking_case):
-    """Large variables are stored with time-axis chunking rather than contiguously."""
-    input_head_dir, output_head_dir = large_file_for_chunking_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-    ts_paths = ts_collection.execute()
-
-    for path in ts_paths:
-        assert check_timeseries_conform(path)
-        with GenTSDataStore(path, 'r') as ts_ds:
-            assert list(ts_ds["VAR0"].chunking()) != list(ts_ds["VAR0"].shape)
-
-
-def test_dask_deprecation_warning(simple_case):
-    """Passing dask_client=True to TSCollection raises a DeprecationWarning."""
-    input_head_dir, output_head_dir = simple_case
-    hf_collection = HFCollection(input_head_dir)
-
-    with pytest.warns(DeprecationWarning):
-        ts_collection = TSCollection(hf_collection, output_head_dir, dask_client=True)
-
-
-def test_strfrmt_kwargs(simple_case):
-    """Test various inputs to TSCollection ``strfrmt_kwargs``."""
-    input_head_dir, output_head_dir = simple_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-
-    for order in ts_collection:
-        assert order["ts_string"] == "185001-185401"
-    
-    ts_collection = ts_collection.update_ts_orders(
-        strfrmt_kwargs={"monthly_format": "%Y%m%d%H"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "1850011600-1854011600"
-
-    ts_collection = ts_collection.update_ts_orders(
-        strfrmt_kwargs={"monthly_format": "%Y"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "1850-1854"
-
-    ts_collection = ts_collection.update_ts_orders(
-        strfrmt_kwargs={"daily_format": "%Y%m%d%H"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "185001-185401"
-
-    ts_collection = ts_collection.update_ts_orders(
-        strfrmt_kwargs={"yearly_format": "%Y%m%d%H"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "185001-185401"
-
-
-def test_time_alignment_kwargs(simple_case):
-    """Test various inputs to TSCollection ``time_alignment_method``."""
-    input_head_dir, output_head_dir = simple_case
-    hf_collection = HFCollection(input_head_dir)
-    ts_collection = TSCollection(hf_collection, output_head_dir)
-
-    with pytest.raises(ValueError):
-        ts_collection = ts_collection.update_ts_orders(
-            time_alignment_method=None
-        )
-
-    ts_collection = ts_collection.update_ts_orders(
-        time_alignment_method="direct_time",
-        strfrmt_kwargs={"monthly_format": "%Y%m%d"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "18500116-18540116"
-
-    ts_collection = ts_collection.update_ts_orders(
-        time_alignment_method="midpoint",
-        strfrmt_kwargs={"monthly_format": "%Y%m%d"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "18500116-18540116"
-
-    ts_collection = ts_collection.update_ts_orders(
-        time_alignment_method="start_bound",
-        strfrmt_kwargs={"monthly_format": "%Y%m%d"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "18500101-18540101"
-
-    ts_collection = ts_collection.update_ts_orders(
-        time_alignment_method="end_bound",
-        strfrmt_kwargs={"monthly_format": "%Y%m%d"}
-    )
-    for order in ts_collection:
-        assert order["ts_string"] == "18500201-18540201"
+    ts_collection.include("*/2/*").execute()

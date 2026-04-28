@@ -6,49 +6,29 @@ Developer: Cameron Cummins
 Contact: cameron.cummins@utexas.edu
 Last Header Update: 07/03/25
 """
+import netCDF4
 import numpy as np
 from cftime import num2date
-from gents.datastore import GenTSDataStore
+from gents.utils import LOG_LEVEL_IO_WARNING
+import logging
 
+logger = logging.getLogger(__name__)
 
-def is_var_secondary(variable,
+def is_var_secondary(variable: netCDF4._netCDF4._Variable,
                      secondary_vars: list = ["time_bnds", "time_bnd", "time_bounds", "time_bound"],
                      secondary_dims: list = ["nbnd", "chars", "string_length", "hist_interval"],
                      max_num_dims: int = 1,
                      primary_dims: list = ["time"]) -> bool:
     """
-    Classifies a netCDF variable as secondary or primary.
+    Determines if a variable is secondary or not (and then should be included in all time series files).
+    Criteria are applied in order of the parameters described.
 
-    Secondary variables (e.g. coordinate and auxiliary fields such as ``time``,
-    ``time_bnds``, ``lat``, ``lon``) are written unchanged into every time-series
-    output file.  Primary variables (multi-dimensional, time-varying scientific
-    fields) each warrant their own time-series output file.
-
-    Rules are evaluated in order:
-
-    1. Variable name is in ``secondary_vars`` → secondary.
-    2. Any dimension name is in ``secondary_dims`` → secondary.
-    3. Variable has more than ``max_num_dims`` dimensions and none are in
-       ``primary_dims`` → secondary.
-    4. Otherwise the variable is primary (has a ``time`` dimension and more
-       than one dimension total).
-
-    :param variable: netCDF4 variable object to classify.
-    :type variable: netCDF4._netCDF4.Variable
-    :param secondary_vars: Variable names that are unconditionally secondary.
-        Defaults to ``['time_bnds', 'time_bnd', 'time_bounds', 'time_bound']``.
-    :type secondary_vars: list
-    :param secondary_dims: Dimension names whose presence makes a variable secondary.
-        Defaults to ``['nbnd', 'chars', 'string_length', 'hist_interval']``.
-    :type secondary_dims: list
-    :param max_num_dims: Maximum number of dimensions a variable may have before
-        the ``primary_dims`` check is applied. Defaults to ``1``.
-    :type max_num_dims: int
-    :param primary_dims: Dimension names whose presence keeps a variable primary.
-        Defaults to ``['time']``.
-    :type primary_dims: list
-    :returns: ``True`` if the variable is secondary, ``False`` if primary.
-    :rtype: bool
+    :param dimensions: Dimensions for the variable.
+    :param secondary_dims: List of secondary variable names
+    :param secondary_dims: List of dimensions that make a variable secondary
+    :param max_num_dims: Maximum number of dimensions a secondary variable should have.
+    :param primary_dims: List of dimensions that make a variable primary (thus not secondary).
+    :return: True if the variable is secondary, false if not.
     """
     if variable.name in secondary_vars:
         return True
@@ -69,34 +49,22 @@ def is_var_secondary(variable,
 
 def get_attributes(dataset):
     """
-    Extracts all attributes from a netCDF4 dataset or variable into a dictionary.
-
-    :param dataset: A ``netCDF4.Dataset``, ``netCDF4.MFDataset``, or
-        ``netCDF4.Variable`` object from which to read attributes.
-    :returns: Dictionary mapping attribute names to their values.
-    :rtype: dict
+    Builds Python dictionary of attributes from netCDF4 dataset and variable classes
+    
+    :param dataset: netCDF4 dataset or variable class object
+    :return: Dictionary containing attributes.
     """
     attrs = {}
-    for key in dataset.ncattrs():
-        attrs[key] = getattr(dataset, key)
+    if type(dataset) is netCDF4._netCDF4.MFDataset:
+        for key in dataset.ncattrs():
+            attrs[key] = dataset.__getattribute__(key)
+    else:
+        for key in dataset.ncattrs():
+            attrs[key] = dataset.__getattr__(key)
     return attrs
 
 
 def get_time_variables_names(ds):
-    """
-    Locates the time and time-bounds variable names in a netCDF dataset.
-
-    Performs a case-insensitive scan of all variable names and returns the
-    canonical name of the ``time`` variable and, if present, the name of the
-    corresponding time-bounds variable (``time_bnds``, ``time_bnd``,
-    ``time_bounds``, or ``time_bound``).
-
-    :param ds: Open netCDF4 dataset to inspect.
-    :type ds: netCDF4.Dataset
-    :returns: Tuple of ``(time_name, time_bounds_name)``. Either element is
-        ``None`` if the corresponding variable is not found.
-    :rtype: tuple[str or None, str or None]
-    """
     time_eqv = None
     time_bnds_eqv = None
 
@@ -117,66 +85,34 @@ def get_time_variables_names(ds):
 
 
 class netCDFMeta:
-    """
-    Stores metadata extracted from a single netCDF history file.
-
-    Caches time values (as raw floats and as CFTime objects), optional
-    time-bounds values, global file attributes, variable lists partitioned into
-    primary vs. secondary sets, and per-dimension coordinate bounds.  Instances
-    are constructed by :func:`get_meta_from_path` and consumed throughout
-    :mod:`gents.hfcollection`.
-    """
-
-    def __init__(self, ds, path: str):
+    """Stores and provides interface for accessing necessary metadata for individual history files."""
+    def __init__(self, ds: netCDF4.Dataset):
         """
-        Reads and caches metadata from an open netCDF4 dataset.
-
-        Performs the following steps:
-
-        1. Reads global attributes via :func:`get_attributes`.
-        2. Locates the time and time-bounds variables via
-           :func:`get_time_variables_names`.
-        3. Reads and normalises time values (handles scalar, 1-D, and
-           higher-dimensional arrays via ``numpy.squeeze``).
-        4. Converts float times to CFTime objects via ``cftime.num2date``.
-        5. If a time-bounds variable exists, reads and converts it (falling back
-           to the time variable's units/calendar if the bounds variable lacks them).
-        6. Classifies every variable as primary or secondary via
-           :func:`is_var_secondary`.
-        7. Records coordinate bounds for each dimension that has an associated
-           coordinate variable.
-
-        :param ds: Open netCDF4 dataset for the history file.
-        :type ds: netCDF4.Dataset
-        :param path: File-system path to the history file (stored for later retrieval).
-        :type path: str
-        :raises ValueError: If no time-equivalent variable is found, or if the
-            time-bounds variable is a scalar.
-        :raises AttributeError: If the time variable lacks ``units`` or ``calendar``
-            attributes.
+        :param ds: netCDF dataset read of history file (not this is not the path).
         """
         self.__time_vals = None
         self.__cftime_vals = None
 
-        self.__attrs = get_attributes(ds)
-        self.__path = path
-
         time_eqv, time_bnds_eqv = get_time_variables_names(ds)
         
+        if time_bnds_eqv is None:
+            logger.warning(f"Unable to find equivalent 'time_bounds' variable.")
+
         if time_eqv is None:
-            raise ValueError(f"No equivalent time variable found to concatenate over. Path: {self.__path}")
+            logger.log(LOG_LEVEL_IO_WARNING, f"Unable to find 'time' variable.")
+            raise ValueError(f"No equivalent time variable found to concatenate over.")
 
-        self.__time_vals = ds[time_eqv][:]
+        try:
+            self.__time_vals = ds[time_eqv][:]
 
-        if len(self.__time_vals.shape) > 1:
-            self.__time_vals = np.squeeze(self.__time_vals)
-        elif len(self.__time_vals.shape) == 0:
-            self.__time_vals = np.array([self.__time_vals])
+            if len(self.__time_vals.shape) > 1:
+                self.__time_vals = np.squeeze(self.__time_vals)
+            elif len(self.__time_vals.shape) == 0:
+                self.__time_vals = np.array([self.__time_vals])
 
-        if 'calendar' not in ds[time_eqv].ncattrs() or 'units' not in ds[time_eqv].ncattrs():
-            raise AttributeError(f"Unable to pull 'calendar' and/or 'units' attributes from '{time_eqv}' time-equivalent variable. Path: {self.__path}")
-
-        self.__cftime_vals = num2date(self.__time_vals, units=ds[time_eqv].units, calendar=ds[time_eqv].calendar)
+            self.__cftime_vals = num2date(self.__time_vals, units=ds[time_eqv].units, calendar=ds[time_eqv].calendar)
+        except AttributeError:
+            logger.log(LOG_LEVEL_IO_WARNING, f"Unable to pull 'calendar' and/or 'units' attributes from 'time' variable.")
 
         self.__time_bounds_vals = None
         self.__cftime_bounds_vals = None
@@ -189,27 +125,26 @@ class netCDFMeta:
             elif len(self.__time_bounds_vals.shape) == 1:
                 self.__time_bounds_vals = np.array([self.__time_bounds_vals])
             elif len(self.__time_bounds_vals.shape) == 0:
-                raise ValueError(f"Found a 'time_bounds' equivalent variable, but it was a single value. It must have two values (one for each boundary). Path: {self.__path}")
+                raise ValueError(f"Found a 'time_bounds' equivalent variable, but it was a single value. It must have two values (one for each boundary).")
 
             try:
                 self.__cftime_bounds_vals = num2date(self.__time_bounds_vals, units=ds[time_bnds_eqv].units, calendar=ds[time_bnds_eqv].calendar)
             except AttributeError:
+                logger.log(LOG_LEVEL_IO_WARNING, f"Unable to pull 'calendar' and/or 'units' attributes from 'time_bounds' equivalent variable. Using 'time' attributes instead.")
                 self.__cftime_bounds_vals = num2date(self.__time_bounds_vals, units=ds[time_eqv].units, calendar=ds[time_eqv].calendar)
+
         self.__var_names = list(ds.variables)
         self.__primary_var_names = []
         self.__secondary_var_names = []
-        self.__variable_shapes = {}
-        self.__variable_dims = {}
-        self.__variable_dtypes = {}
-
+        
         for variable in ds.variables:
             if is_var_secondary(ds[variable]):
                 self.__secondary_var_names.append(variable)
             else:
                 self.__primary_var_names.append(variable)
-            self.__variable_shapes[variable] = ds[variable].shape
-            self.__variable_dims[variable] = ds[variable].dimensions
-            self.__variable_dtypes[variable] = ds[variable].dtype
+                
+        self.__attrs = get_attributes(ds)
+        self.__path = ds.filepath()
 
         self.__dim_bounds = {}
 
@@ -223,141 +158,61 @@ class netCDFMeta:
 
     def get_path(self):
         """
-        Returns the file-system path of the history file this object was built from.
-
-        :returns: Path to the source history file.
-        :rtype: str
+        :return: Get path to history file represented by this metadata class.
         """
         return self.__path
     
     def get_cftime_bounds(self):
         """
-        Returns the time-bounds array as CFTime objects.
-
-        :returns: Array of CFTime bound pairs, or ``None`` if the history file
-            contains no time-bounds variable.
-        :rtype: numpy.ndarray or None
+        :return: Get time bounds variable as CFTime objects.
         """
         return self.__cftime_bounds_vals
 
     def get_float_time_bounds(self):
         """
-        Returns the time-bounds array as raw float values.
-
-        :returns: Array of float time-bound pairs, or ``None`` if the history file
-            contains no time-bounds variable.
-        :rtype: numpy.ndarray or None
+        :return: Get time bounds variable as floats.
         """
         return self.__time_bounds_vals
 
     def get_float_times(self):
         """
-        Returns the raw float time values read from the ``time`` variable.
-
-        :returns: 1-D array of float time values.
-        :rtype: numpy.ndarray
+        :return: Get array of floats from time dimension.
         """
         return self.__time_vals
 
     def get_cftimes(self):
         """
-        Returns the time values converted to CFTime objects.
-
-        :returns: Array of CFTime datetime objects corresponding to each time step.
-        :rtype: numpy.ndarray
+        :return: Get array of CFTime objects from time dimension.
         """
         return self.__cftime_vals
 
     def get_variables(self):
         """
-        Returns the full list of variable names present in the history file.
-
-        :returns: List of all variable name strings.
-        :rtype: list
+        :return: Get array of CFTime objects
         """
         return self.__var_names
 
     def get_primary_variables(self):
         """
-        Returns the names of primary variables in the history file.
-
-        Primary variables are multi-dimensional, time-varying scientific fields
-        that each warrant their own time-series output file.
-
-        :returns: List of primary variable name strings.
-        :rtype: list
+        :return: Get primary variables derived from this history file.
         """
         return self.__primary_var_names
 
     def get_secondary_variables(self):
         """
-        Returns the names of secondary variables in the history file.
-
-        Secondary variables are coordinate and auxiliary fields (e.g. ``time``,
-        ``time_bnds``, ``lat``, ``lon``) that are written unchanged into every
-        time-series output file.
-
-        :returns: List of secondary variable name strings.
-        :rtype: list
+        :return: Get secondary variables derived from this history file.
         """
         return self.__secondary_var_names
 
-    def get_variable_dims(self, variable):
-        """
-        Returns the dimension names for the given variable.
-
-        :param variable: Name of the variable to look up.
-        :type variable: str
-        :returns: Tuple or list of dimension name strings for the variable.
-        :rtype: tuple
-        """
-        return self.__variable_dims[variable]
-
-    def get_variable_shapes(self, variable):
-        """
-        Returns the shape of the given variable.
-
-        :param variable: Name of the variable to look up.
-        :type variable: str
-        :returns: Tuple of integers describing the size of each dimension.
-        :rtype: tuple
-        """
-        return self.__variable_shapes[variable]
-
-    def get_variable_dtype(self, variable):
-        """
-        Returns the data type of the given variable.
-
-        :param variable: Name of the variable to look up.
-        :type variable: str
-        :returns: NumPy dtype describing the element type of the variable.
-        :rtype: numpy.dtype
-        """
-        return self.__variable_dtypes[variable]
-
     def get_attributes(self):
         """
-        Returns the global attributes dictionary cached from the history file.
-
-        :returns: Dictionary mapping global attribute names to their values.
-        :rtype: dict
+        :return: Get all attributes from this history file.
         """
         return self.__attrs
 
     def is_valid(self):
         """
-        Returns whether this history file is usable for time-series generation.
-
-        A file is considered invalid if any of the following are true:
-
-        - Both ``get_cftime_bounds()`` and ``get_cftimes()`` are ``None``
-          (no usable time coordinate).
-        - The file contains zero primary and zero secondary variables.
-        - A ``gents_version`` global attribute is present (the file is already
-          a GenTS-generated time-series output, not a raw history file).
-
-        :returns: ``True`` if the file is valid for processing, ``False`` otherwise.
-        :rtype: bool
+        :return: Whether or not all necessary information is available for GenTS to create a time series.
         """
         if self.get_cftime_bounds() is None and self.get_cftimes() is None:
             return False
@@ -369,40 +224,20 @@ class netCDFMeta:
 
     def get_dim_bounds(self):
         """
-        Returns coordinate bounds for each dimension in the history file.
-
-        For each dimension that has an associated coordinate variable, maps the
-        dimension name to a list containing its minimum value (single-element list
-        for a scalar coordinate) or ``[min_value, max_value]`` for a range.  Used
-        by :func:`~gents.hfcollection.merge_fragmented_groups` to identify spatial
-        extent when merging tiled files.
-
-        :returns: Dictionary mapping dimension names to their coordinate bound lists.
-        :rtype: dict
+        :return: Dictionary containing the bounds for each dimension coordinate variable.
         """
         return self.__dim_bounds
 
 def get_meta_from_path(path: str):
     """
-    Opens a netCDF file, constructs a :class:`netCDFMeta` object, and returns it.
-
-    Serves as a picklable factory wrapper around :class:`netCDFMeta` so that
-    instances can be created inside ``ProcessPoolExecutor`` worker processes.
-    Any exception raised during construction is re-raised with the file path
-    appended to the message for easier debugging.
-
-    :param path: Path to the netCDF history file.
-    :type path: str
-    :returns: Metadata object populated from the specified file.
-    :rtype: netCDFMeta
-    :raises Exception: Re-raises any exception from ``netCDFMeta.__init__``
-        with the file path appended to the message.
+    The netCDFMeta class only accepts netCDF4.Dataset objects as input to manage I/O errors.
+    This function serves as a wrapper to obtain metadata.
+    
+    :param path: Path to netCDF file.
+    :return: netCDF4 Dataset read of the history file.
     """
     ds_meta = None
-    try:
-        with GenTSDataStore(path, 'r') as ds:
-            ds_meta = netCDFMeta(ds, path)
-    except Exception as e:
-        raise type(e)(f"{e} Path: {path}") from e
+    with netCDF4.Dataset(path, 'r') as ds:
+        ds_meta = netCDFMeta(ds)
 
     return ds_meta

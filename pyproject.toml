@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GenTS"
-version = "1.0.0"
+version = "0.9.4"
 authors = [
   { name="Cameron Cummins", email="cameron.cummins@utexas.edu" },
 ]
 description = "A useful tool for post-processing Earth System Model output 'history files' into the time series format."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10.13"
 dependencies = [
   "numpy",
   "netcdf4",
@@ -29,5 +29,5 @@ Issues = "https://github.com/AgentOxygen/GenTS"
 [tool.setuptools]
 packages = ["gents"]
 
-[project.scripts]
-run_gents = "gents.cli:main"
+[project.optional-dependencies]
+parallel = ["dask[distributed]"]

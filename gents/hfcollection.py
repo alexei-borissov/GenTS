@@ -10,29 +10,32 @@ from gents.meta import get_meta_from_path
 from gents.utils import ProgressBar, LOG_LEVEL_IO_WARNING
 from cftime import num2date
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import os
 import fnmatch
 import cftime
+import netCDF4
 import warnings
 import logging
-import copy
 
 logging.captureWarnings(True)
 logger = logging.getLogger(__name__)
 
+try:
+    from dask.distributed import client
+    import dask
+    DASK_INSTALLED = True
+except ImportError:
+    DASK_INSTALLED = False
+    logger.debug("Dask not installed. Proceeding in serial.")
+
 
 def check_config(config):
     """
-    Validates that a configuration dictionary contains the required keys and types.
+    Used to ensure configuration dictionary has necessary parameters.
 
-    Asserts the presence of ``'name'``, ``'include'``, and ``'exclude'`` keys and
-    that their values are of the expected types.
-
-    :param config: Configuration dictionary to validate.
-    :type config: dict
-    :raises AssertionError: If any required key is missing or has an unexpected type.
+    :param config: The config directory to check.
+    :return: True if config dictionary is correctly set, false if not.
     """
     assert "name" in config
     assert "include" in config
@@ -43,11 +46,9 @@ def check_config(config):
 
 def get_default_config():
     """
-    Returns a configuration dictionary populated with default GenTS settings.
+    Generates dictionary containing default configurations for GenTS.
 
-    :returns: Dictionary with ``name="default"``, ``include=None``,
-        ``exclude=None``.
-    :rtype: dict
+    :return: Dictionary with default parameters.
     """
     return {
         "name": "default",
@@ -58,18 +59,11 @@ def get_default_config():
 
 def find_files(head_path, pattern):
     """
-    Recursively searches a directory tree for files matching a glob pattern.
+    Search for files in the specified head directory and all subdirectories that match the given wildcard pattern.
 
-    Walks ``head_path`` with ``os.walk`` and collects every file whose name
-    matches ``pattern`` via ``fnmatch``.
-
-    :param head_path: Root directory to begin the recursive search from.
-    :type head_path: str or pathlib.Path
-    :param pattern: ``fnmatch``-style wildcard pattern to match file names
-        against (e.g. ``'*.nc'``).
-    :type pattern: str
-    :returns: Sorted list of matching file paths.
-    :rtype: list[pathlib.Path]
+    :param head_path: The head directory to start searching from.
+    :param pattern: The wildcard pattern to match files against (e.g., '*.nc').
+    :return: A list of file paths that match the pattern.
     """
     matched_files = []
 
@@ -83,53 +77,30 @@ def find_files(head_path, pattern):
 
 def calculate_year_slices(slice_size_years, min_year, max_year):
     """
-    Computes non-overlapping year-range tuples covering a given span.
+    Calculates the ranges for each slice in years within a given range.
 
-    Each slice is at most ``slice_size_years`` wide.  The upper boundary is
-    aligned by rounding ``max_year`` up to the next multiple of
-    ``slice_size_years``.  Returns a single tuple if the full span fits within
-    one slice.
-
-    :param slice_size_years: Maximum width of each slice in years.
-    :type slice_size_years: int
-    :param min_year: First year in the range (inclusive).
-    :type min_year: int
-    :param max_year: Last year in the range (inclusive).
-    :type max_year: int
-    :returns: List of ``(start_year, end_year)`` tuples, one per slice.
-    :rtype: list[tuple[int, int]]
-    :raises ValueError: If ``max_year`` is less than ``min_year``.
+    :param slice_size_years: Length of each slice in years.
+    :param min_year: Minimum or starting year for the full range.
+    :param max_year: Maximum or ending year for the full range.
+    :return: List of tuples where each tuple defines the year range for each slice
     """
-    if max_year < min_year:
-        raise ValueError("Maximum year cannot exceed minimum year.")
-    if slice_size_years >= max_year - min_year:
-        return [(min_year, max_year)]
-
-    start_year = min_year
+    start_year = int(np.floor(min_year / slice_size_years)*slice_size_years)
     end_year = int(np.ceil(max_year / slice_size_years)*slice_size_years)
 
     ranges = []
-    for year in np.arange(start_year, end_year+slice_size_years, slice_size_years, dtype=int):
+    for year in np.arange(start_year, end_year, slice_size_years, dtype=int):
         ranges.append((int(year), int(year+slice_size_years-1)))
-        if year >= max_year or year+slice_size_years-1 >= max_year:
-            break
     
     return ranges
 
 
 def find_all_indices(string, substring):
     """
-    Returns all start indices where ``substring`` occurs within ``string``.
-
-    Uses a sliding-window ``str.find`` loop so overlapping occurrences are
-    all reported.
+    Finds all indices where the substring occurs in a string.
 
     :param string: The string to search in.
-    :type string: str
     :param substring: The substring to search for.
-    :type substring: str
-    :returns: List of integer indices where ``substring`` begins.
-    :rtype: list[int]
+    :return: A list of indices where the substring is found.
     """
     indices = []
     start = 0
@@ -144,26 +115,12 @@ def find_all_indices(string, substring):
 
 def sort_hf_groups(hf_paths, delimiter=".", substring_index=2):
     """
-    Groups history file paths by directory and shared filename prefix.
+    Groups history file paths by directory and substrings.
 
-    Files are first grouped by their parent directory, then within each
-    directory by a common filename prefix derived by dropping the last
-    ``substring_index`` ``delimiter``-delimited tokens from each filename.
-
-    For example, ``model.h0.0001-01.nc`` and ``model.h0.0001-02.nc`` share
-    the prefix ``model.h0`` and end up in the same group.
-
-    :param hf_paths: List of history file paths to group.
-    :type hf_paths: list[pathlib.Path]
-    :param delimiter: Token delimiter used to parse the filename prefix.
-        Defaults to ``'.'``.
-    :type delimiter: str
-    :param substring_index: Number of trailing delimiter-separated tokens to
-        strip when deriving the group prefix. Defaults to ``2``.
-    :type substring_index: int
-    :returns: Dictionary mapping ``'<parent_dir>/<prefix>*'`` pattern strings
-        to lists of matching file paths.
-    :rtype: dict[str, list[pathlib.Path]]
+    :param hf_paths: List of paths to history files.
+    :param delimiter: The delimiter to find the substrings with.
+    :param substring_index: Substrings to skip after splitting with the delimiter (from right to left).
+    :return: A dictionary that maps group substrings (key) to history file paths (value)
     """
     directory_groups = {}
     for path in hf_paths:
@@ -192,16 +149,10 @@ def sort_hf_groups(hf_paths, delimiter=".", substring_index=2):
 
 def get_year_bounds(hf_to_meta_map):
     """
-    Determines the minimum and maximum year covered by a set of history files.
+    Determines the minimum and maximum year for a series of mapped history files.
 
-    Uses the midpoint of each time bound (or the time value itself if no bounds
-    are present) to determine which year each file belongs to.
-
-    :param hf_to_meta_map: Dictionary mapping file paths to their
-        :class:`~gents.meta.netCDFMeta` objects.
-    :type hf_to_meta_map: dict
-    :returns: Tuple of ``(min_year, max_year)`` as integers.
-    :rtype: tuple[int, int]
+    :param hf_to_time_map: Dictionary that maps history file paths (key) to their time and time bound data (value)
+    :return: The minimum and maximum years from the specified history files as a tuple
     """
     min_year = np.inf
     max_year = -np.inf
@@ -216,8 +167,9 @@ def get_year_bounds(hf_to_meta_map):
         for index in range(len(time_bounds)):
             lower_bound, upper_bound = time_bounds[index]
             
-            mid_time = lower_bound + ((upper_bound - lower_bound) / 2)
-
+            mid_ordinal = np.median([lower_bound.toordinal(), upper_bound.toordinal()])
+            mid_time = cftime.datetime.fromordinal(mid_ordinal, calendar=lower_bound.calendar)
+                    
             if mid_time.year > max_year:
                 max_year = mid_time.year
             if mid_time.year < min_year:
@@ -227,32 +179,15 @@ def get_year_bounds(hf_to_meta_map):
 
 def generate_output_template(hf_head_dir, group_path_id, output_head_dir=None, directory_swaps={"hist": "tseries"}, filename_delimiter=".", cutoff_index=None):
     """
-    Constructs a time-series output path template from a history file group path.
+    Creates file path template (missing file name suffix) for outputing timeseries files to.
 
-    Builds the output path (excluding the variable-name and timestamp suffix) by
-    extracting the subdirectory structure relative to ``hf_head_dir``, applying
-    any ``directory_swaps`` renames, and stripping date tokens from the filename
-    prefix up to ``cutoff_index``.
-
-    :param hf_head_dir: Head directory used when reading the history files.
-    :type hf_head_dir: str
-    :param group_path_id: Group path pattern produced by :func:`sort_hf_groups`
-        (e.g. ``'/data/hist/model.h0*'``).
-    :type group_path_id: str or pathlib.Path
-    :param output_head_dir: Alternate head directory for output. Defaults to
-        ``None`` (uses ``hf_head_dir``).
-    :type output_head_dir: str or None
-    :param directory_swaps: Mapping of directory name substrings to replace
-        (e.g. ``{'hist': 'tseries'}``). Defaults to ``{'hist': 'tseries'}``.
-    :type directory_swaps: dict
-    :param filename_delimiter: Delimiter used to split the filename into tokens.
-        Defaults to ``'.'``.
-    :type filename_delimiter: str
-    :param cutoff_index: Character index at which to truncate the filename prefix.
-        Defaults to ``None`` (cuts at the last delimiter occurrence).
-    :type cutoff_index: int or None
-    :returns: Path template for time-series output (without variable/timestamp suffix).
-    :rtype: pathlib.Path
+    :param hf_head_dir: Head directory used to read in the history files.
+    :param group_path_id: One group path ID produced by slice_hf_groups.
+    :param output_head_dir: Head directory to output to, if not the same as the input head directory.
+    :param directory_swaps: Dictionary with directory names (key) to rename (value)
+    :param filename_delimiter: Delimiter used to separate file name tags
+    :param cutoff_index: Index to cutoff tags that are generated using the delimiter (typically used to remove the date)
+    :return: Output template path for generating time series files.
     """
     group_path_id = Path(group_path_id)
                          
@@ -281,20 +216,12 @@ def generate_output_template(hf_head_dir, group_path_id, output_head_dir=None, d
 
 def is_ds_within_years(ds_meta, min_year, max_year):
     """
-    Checks whether a dataset's representative time falls within a year range.
-
-    Uses the midpoint of the first time bound as the representative year, or
-    the first time value directly if no time bounds are present.
-
-    :param ds_meta: Metadata object for the dataset to check.
-    :type ds_meta: gents.meta.netCDFMeta
-    :param min_year: Lower bound of the year range (inclusive).
-    :type min_year: int
-    :param max_year: Upper bound of the year range (inclusive).
-    :type max_year: int
-    :returns: ``True`` if the representative year falls within
-        ``[min_year, max_year]``, ``False`` otherwise.
-    :rtype: bool
+    Checks if time bounds from dataset metadata are between the year range.
+    
+    :param ds_meta: Metadata associated with the dataset.
+    :param min_year: Minimum year in range.
+    :param max_year: Maximum year in range.
+    :return: True if time bounds are within the year range, false if not.
     """
     time_bounds = ds_meta.get_cftime_bounds()
     if time_bounds is not None:
@@ -310,19 +237,10 @@ def is_ds_within_years(ds_meta, min_year, max_year):
 
 def filter_by_variables(meta_datasets):
     """
-    Identifies the majority variable set among a list of history file metadata objects.
-
-    Groups metadata objects by their sorted variable-name fingerprint and
-    returns the set belonging to the most common variable list alongside any
-    outliers.
-
-    :param meta_datasets: List of metadata objects to examine.
-    :type meta_datasets: list[gents.meta.netCDFMeta]
-    :returns: Tuple of ``(majority, others)`` where ``majority`` is the list of
-        metadata objects sharing the most common variable set and ``others``
-        contains the remainder.  ``others`` is ``None`` if all objects share
-        the same variable set.
-    :rtype: tuple[list, list or None]
+    Checks for consistency within a list of datasets.
+    
+    :param ds_meta: List of metadatas associated with the datasets.
+    :return: Tuple containing majority variables
     """
     variable_sets = {}
     for index in range(len(meta_datasets)):
@@ -361,14 +279,10 @@ def filter_by_variables(meta_datasets):
 
 def sort_metas_by_time(metas):
     """
-    Returns a new list of metadata objects sorted by their first CFTime value.
-
-    Performs an insertion sort; the original list is not modified.
-
-    :param metas: Unsorted list of metadata objects.
-    :type metas: list[gents.meta.netCDFMeta]
-    :returns: New list sorted in ascending time order.
-    :rtype: list[gents.meta.netCDFMeta]
+    Re-arranges the metadata objects in a list so that they are ordered by time.
+    
+    :param metas: List of unsorted metadata.
+    :return: List of metadata sorted by time.
     """
     time_sorted_metas = [metas[0]]
 
@@ -389,19 +303,11 @@ def sort_metas_by_time(metas):
     
 def check_groups_by_variables(sliced_groups):
     """
-    Filters history file groups to ensure variable-set consistency within each group.
-
-    For each group, calls :func:`filter_by_variables` to identify the majority
-    variable set, discards minority files with a logged warning, and re-sorts the
-    retained files by time via :func:`sort_metas_by_time`.  Groups for which no
-    majority can be determined are dropped entirely with a warning.
-
-    :param sliced_groups: Dictionary mapping group IDs to lists of
-        :class:`~gents.meta.netCDFMeta` objects.
-    :type sliced_groups: dict
-    :returns: Filtered dictionary containing only the majority-consistent metadata
-        objects per group, sorted by time.
-    :rtype: dict
+    Checks if the history files for each group have the same sets of variables.
+    If an inconsistent set is discovered, it is thrown out and a warning is logged.
+    
+    :param sliced_groups: Sliced groups of history files to check.
+    :return: Sliced groups with inconsistent sets filtered out.
     """
     filtered_sliced_groups = {}
     for group in sliced_groups:
@@ -419,24 +325,11 @@ def check_groups_by_variables(sliced_groups):
 
 def merge_fragmented_groups(hf_groups, hf_meta_map):
     """
-    Merges spatially fragmented (tiled) history file groups into unified groups.
-
-    Iterates through ``hf_groups`` and separates fragmented files (identified by
-    paths that do not end with ``.nc``) from standard files.  Fragmented groups
-    are hashed by their non-time dimension bounds; groups sharing the same hash
-    are merged into a single entry under a new wildcard key.  Non-fragmented
-    files are passed through unchanged.
-
-    :param hf_groups: Dictionary mapping group pattern strings to lists of
-        history file paths.
-    :type hf_groups: dict
-    :param hf_meta_map: Dictionary mapping file paths to their
-        :class:`~gents.meta.netCDFMeta` objects (used to retrieve dimension bounds).
-    :type hf_meta_map: dict
-    :returns: New group dictionary with fragmented groups merged.
-    :rtype: dict
-    :raises KeyError: If a merged fragmented group label already exists among
-        the non-fragmented groups.
+    Iterates through grouped history files and merges groups that have identical time values, variable names,
+    but differing values on other dimensions.
+    
+    :param groups: Grouped history file dictionary to iterate through.
+    :return: New grouped history file dictionary with fragmented groups merged together. 
     """
     new_groups = {}
     fragmented_groups = {}
@@ -450,12 +343,12 @@ def merge_fragmented_groups(hf_groups, hf_meta_map):
 
     if len(fragmented_groups) > 0:
         num_fragmented_files = sum([len(fragmented_groups[pattern]) for pattern in fragmented_groups])
-        logger.info(f"Found {num_fragmented_files} spatially fragmented files in {len(fragmented_groups)} groups.")
+        logger.info(f"Found {num_fragmented_files} spatially fragmented files.")
 
     dim_hashes = {}
     for pattern in fragmented_groups:
         dims = hf_meta_map[fragmented_groups[pattern][0]].get_dim_bounds()
-        dims = {variable: dims[variable] for variable in dims if variable != "time"}
+        dims = {variable: dims[variable] for variable in dims if "time" not in dims}
         dims_hash = str(dims)
 
         if dims_hash not in dim_hashes:
@@ -476,50 +369,21 @@ def merge_fragmented_groups(hf_groups, hf_meta_map):
 
 
 class HFCollection:
-    """
-    Manages a collection of netCDF history files and their metadata.
-
-    Holds a ``{path: netCDFMeta | None}`` mapping and lazily loads metadata
-    on demand via :meth:`pull_metadata`.  All filter and slice operations return
-    new ``HFCollection`` instances, preserving an immutable-style fluent API.
-    """
-
-    def __init__(self, hf_dir, num_processes=1, meta_map=None, hf_groups=None, step_map=None, hf_glob_pattern="*.nc*", dask_client=None):
+    """History File Collection, holds paths to all history files and serves as an interface for interpreting the metadata."""
+    def __init__(self, hf_dir, dask_client=None, meta_map=None, hf_groups=None, hf_glob_pattern="*.nc*"):
         """
-        Initialises the collection by discovering history files under ``hf_dir``.
-
-        If ``meta_map`` is not supplied, all discovered files are registered with
-        ``None`` metadata (populated later by :meth:`pull_metadata`).  When
-        constructing a derived collection via :meth:`copy`, pre-computed maps and
-        groups are passed in directly and the file-discovery log messages are
-        suppressed.
-
-        :param hf_dir: Root directory to search for history files.
-        :type hf_dir: str
-        :param num_processes: Maximum number of worker processes for parallel
-            metadata loading. Defaults to ``1`` (single process).
-        :type num_processes: int or None
-        :param meta_map: Pre-populated ``{path: netCDFMeta}`` mapping. When
-            supplied, overrides the recursive file search. Defaults to ``None``.
-        :type meta_map: dict or None
-        :param hf_groups: Pre-computed group dictionary. Defaults to ``None``.
-        :type hf_groups: dict or None
-        :param step_map: Pre-computed ``{path: timedelta}`` timestep delta map.
-            Defaults to ``None``.
-        :type step_map: dict or None
-        :param hf_glob_pattern: ``fnmatch`` pattern used when searching for files.
-            Defaults to ``'*.nc*'``.
-        :type hf_glob_pattern: str
-        :param dask_client: Deprecated. Pass ``num_processes`` instead.
+        :param hf_dir: Head directory to history files
+        :param dask_client: Dask client object. If not given, the global client is used instead.
+        :param meta_map: History file to metadata map to use if deriving from existing HFCollection (overrides recursive search with hf_dir).
+        :param hf_groups: History file groups if deriving from existing HFCollection (overrides recursive search with hf_dir).
+        :param hf_glob_pattern: Glob pattern to match files against when searching recursively through the head directory.
         """
-        if dask_client is not None:
-            warnings.warn("Dask is no longer implemented in GenTS. Use the 'num_processes' argument to enable parallelism or reference the ReadTheDocs for using Dask..", DeprecationWarning, stacklevel=2)
-
         self.__raw_paths = find_files(hf_dir, hf_glob_pattern)
-        self.__num_processes = num_processes
 
-        if len(self.__raw_paths) == 0:
-            raise FileNotFoundError(f"No files matching '{hf_glob_pattern}' found in '{hf_dir}'")
+        if dask_client is None and DASK_INSTALLED:
+            self.__client = dask.distributed.client._get_global_client()
+        else:
+            self.__client = dask_client
 
         self.__hf_to_meta_map = {}
         if meta_map is None:
@@ -527,6 +391,8 @@ class HFCollection:
                 self.__hf_to_meta_map[path] = None
         else:
             self.__hf_to_meta_map = meta_map
+
+        self.__meta_pulled = self.is_pulled()
         
         self.__hf_groups = hf_groups
         self.__hf_dir = hf_dir
@@ -534,8 +400,6 @@ class HFCollection:
         if meta_map is None and hf_groups is None:
             logger.info(f"Initialized HFCollection at '{hf_dir}'")
             logger.info(f"{len(self.__raw_paths)} netCDF files found.")
-
-        self.__hf_to_timestep_delta_map = step_map
 
     def __getitem__(self, key):
         return self.__hf_to_meta_map[key]
@@ -559,87 +423,40 @@ class HFCollection:
         return self.__hf_to_meta_map.keys()
 
     def is_pulled(self):
-        """
-        Returns whether metadata has been loaded for all files in the collection.
-
-        :returns: ``True`` if every path has a non-``None`` metadata value,
-            ``False`` otherwise.
-        :rtype: bool
-        """
+        """Returns true if all metadata has been pulled. False if not."""
         for path in self.__hf_to_meta_map:
             if self.__hf_to_meta_map[path] is None:
                 return False
         return True
 
-    def get_timestep_delta(self, hf_path):
-        """
-        Returns the pre-computed time-step duration for a given history file.
-
-        Triggers :meth:`pull_metadata` if metadata has not yet been loaded.
-
-        :param hf_path: Path to the history file.
-        :type hf_path: pathlib.Path
-        :returns: Duration of one time step as a ``cftime`` timedelta object.
-        :rtype: datetime.timedelta
-        """
-        self.check_pulled()
-        return self.__hf_to_timestep_delta_map[hf_path]
-
     def get_input_dir(self):
-        """
-        Returns the head directory this collection was initialised from.
-
-        :returns: Root input directory path.
-        :rtype: str
-        """
+        """Return the input directory"""
         return self.__hf_dir
 
     def check_pulled(self):
-        """
-        Ensures metadata is loaded, triggering :meth:`pull_metadata` if necessary.
-        """
-        if not self.is_pulled():
+        """Checks if metadata has been pulled. If not, then pull."""
+        if not self.__meta_pulled:
             self.pull_metadata()
 
-    def copy(self, num_processes=None, meta_map=None, hf_groups=None, step_map=None):
+    def copy(self, dask_client=None, meta_map=None, hf_groups=None):
         """
-        Creates a new ``HFCollection`` derived from this one with optional overrides.
-
-        Shares the same ``hf_dir`` as the original.  Used as the return mechanism
-        for all filter and transform operations to preserve immutability.
-
-        :param num_processes: Worker process count for the copy. Defaults to the
-            current value.
-        :type num_processes: int or None
-        :param meta_map: Metadata map to assign to the copy. Defaults to the
-            current map.
-        :type meta_map: dict or None
-        :param hf_groups: Group dictionary to assign to the copy. Defaults to
-            the current groups.
-        :type hf_groups: dict or None
-        :param step_map: Timestep delta map to assign to the copy. Defaults to
-            the current map.
-        :type step_map: dict or None
-        :returns: New ``HFCollection`` instance.
-        :rtype: HFCollection
+        Copies data of this HFCollection into a new one.
+    
+        :param dask_client: Dask client to assign to copy.
+        :param meta_map: history file to metadata map to use when copying (defaults to existing).
+        :return: HFCollection that is a copy.
         """
-        if num_processes is None:
-            num_processes = self.__num_processes
+        if dask_client is None:
+            dask_client = self.__client
         if meta_map is None:
             meta_map = self.__hf_to_meta_map
-        if hf_groups is None and self.is_pulled():
+        if hf_groups is None and self.__meta_pulled:
             hf_groups = self.get_groups()
-        if step_map is None:
-            step_map = self.__hf_to_timestep_delta_map
-        return HFCollection(self.__hf_dir, num_processes=num_processes, meta_map=meta_map, hf_groups=hf_groups, step_map=step_map)
+        return HFCollection(self.__hf_dir, dask_client=dask_client, meta_map=meta_map, hf_groups=hf_groups)
 
     def sort_along_time(self):
         """
-        Returns a new ``HFCollection`` with files sorted by their first time value.
-
-        :returns: New ``HFCollection`` with the metadata map re-ordered
-            in ascending time order.
-        :rtype: HFCollection
+        Sorts the history files along the time dimension formed out of the time values pulled from metadata.
         """
         self.check_pulled()
 
@@ -648,24 +465,11 @@ class HFCollection:
         logger.info(f"Sorted along time.")
         return self.copy(meta_map=sorted_map)
     
-    def pull_metadata(self, check_valid=True, raise_errors=False):
-        """
-        Loads metadata for all history files in the collection in parallel.
-
-        Submits :func:`~gents.meta.get_meta_from_path` calls to a
-        ``ProcessPoolExecutor`` worker pool and populates the internal metadata
-        map with the results.  After loading, computes the timestep delta for each
-        group by sorting all CFTime values and taking the interval between the last
-        two steps.
-
-        :param check_valid: If ``True`` (default), calls :meth:`check_validity`
-            after loading to remove files with incomplete or invalid metadata.
-        :type check_valid: bool
-        :param raise_errors: If ``True`` (default ``False``), calls errors are raised
-            rather than just logged.
-        :type raise_errors: bool
-        """
+    def pull_metadata(self, check_valid=True):
+        """Pulls metadata associated with each history file in the collection."""
         logger.info(f"Pulling metadata...")
+        ds_metas_futures = []
+        ds_metas = []
         paths = list(self.__hf_to_meta_map.keys())
 
         if self.__client is None:
@@ -693,34 +497,8 @@ class HFCollection:
             logger.warning(f"Skipping metadata validation may result in errors due to missing attributes or coordinate data.")
         logger.info(f"Metadata pulled.")
 
-        if self.__hf_to_timestep_delta_map is None:
-            self.__hf_to_timestep_delta_map = {}
-            for group in self.get_groups():
-                times = []
-                for path in self.get_groups()[group]:
-                    cftimes = self.__hf_to_meta_map[path].get_cftimes()
-                    if isinstance(cftimes, (list, np.ndarray)):
-                        for ts in cftimes:
-                            times.append(ts)
-                    else:
-                        times.append(cftimes)
-                times = np.sort(times)
-                if len(times) < 2:
-                    raise ValueError(f"Expected time array of size 2 or greater, got {len(times)} for group with paths: {self.get_groups()[group]}")
-                for path in self.get_groups()[group]:
-                    self.__hf_to_timestep_delta_map[path] = times[-1] - times[-2]
-
     def check_validity(self):
-        """
-        Removes history files with missing or invalid metadata from the collection.
-
-        Iterates over the metadata map and drops any entry where the metadata is
-        ``None`` or :meth:`~gents.meta.netCDFMeta.is_valid` returns ``False``,
-        logging a warning for each removed file.
-
-        :returns: Dictionary of the removed ``{path: metadata}`` entries.
-        :rtype: dict
-        """
+        """Checks validity of metadata for each history file. Removes missing or incomplete metadata."""
         logger.debug(f"Validating metadata...")
         new_map = {}
         removed = {}
@@ -729,171 +507,96 @@ class HFCollection:
                 new_map[path] = self.__hf_to_meta_map[path]
             else:
                 removed[path] = self.__hf_to_meta_map[path]
-                logger.warning(f"Could not pull valid/complete metadata for '{path}'.")
+                logger.log(LOG_LEVEL_IO_WARNING, f"Could not pull valid/complete metadata for '{path}'.")
         self.__hf_to_meta_map = new_map
         logger.debug(f"{len(new_map)} files valdiated ({len(removed)} removed).")
         return removed
     
     def include_patterns(self, glob_patterns):
         """
-        .. deprecated::
-            Use :meth:`include` instead.
-        """
-        warnings.warn("TSCollection.include_patterns is deprecated in favor of TSCollection.include")
-        return self.include(glob_patterns)
+        Filters out history files in the collection with paths that do not match the glob patterns.
 
-    def exclude_patterns(self, glob_patterns):
+        :param glob_patterns: List of patterns to compare paths against.
         """
-        .. deprecated::
-            Use :meth:`exclude` instead.
-        """
-        warnings.warn("TSCollection.exclude_patterns is deprecated in favor of TSCollection.exclude")
-        return self.exclude(glob_patterns)
-
-    def include(self, glob_patterns):
-        """
-        Returns a new collection containing only files whose paths match the patterns.
-
-        A file is retained if its path matches *at least one* of the provided glob
-        patterns via ``fnmatch``.
-
-        :param glob_patterns: One or more ``fnmatch``-style glob patterns. A single
-            string is also accepted.
-        :type glob_patterns: list[str] or str
-        :returns: New ``HFCollection`` restricted to matching files.
-        :rtype: HFCollection
-        """
-        if type(glob_patterns) is str:
-            glob_patterns = [glob_patterns]
-
         filtered_path_map = {}
         for path in self.__hf_to_meta_map:
             for pattern in glob_patterns:
                 if fnmatch.fnmatch(str(path), pattern):
                     filtered_path_map[path] = self.__hf_to_meta_map[path]
-                    break
         logger.debug(f"Inclusive filter(s) applied: '{glob_patterns}'")
         return self.copy(meta_map=filtered_path_map)
 
-    def exclude(self, glob_patterns):
+    def exclude_patterns(self, glob_patterns):
         """
-        Returns a new collection with files whose paths match the patterns removed.
+        Filters out history files in the collection with paths that do match the glob patterns.
 
-        A file is excluded if its path matches *any* of the provided glob patterns
-        via ``fnmatch``.
-
-        :param glob_patterns: One or more ``fnmatch``-style glob patterns. A single
-            string is also accepted.
-        :type glob_patterns: list[str] or str
-        :returns: New ``HFCollection`` with matching files removed.
-        :rtype: HFCollection
+        :param glob_patterns: List of patterns to compare paths against.
         """
-        if type(glob_patterns) is str:
-            glob_patterns = [glob_patterns]
-
         filtered_path_map = {}
         for path in self.__hf_to_meta_map:
-            matches = False
             for pattern in glob_patterns:
-                if fnmatch.fnmatch(str(path), pattern):
-                    matches = True
-                
-            if not matches:
-                filtered_path_map[path] = self.__hf_to_meta_map[path]
+                if not fnmatch.fnmatch(str(path), pattern):
+                    filtered_path_map[path] = self.__hf_to_meta_map[path]
         logger.debug(f"Exclusive filter(s) applied: '{glob_patterns}'")
         return self.copy(meta_map=filtered_path_map)
 
     def include_years(self, start_year, end_year, glob_patterns=["*"]):
         """
-        Returns a new collection filtered to files whose midpoint time falls within a year range.
+        Filters out history files in the collection that fall outside the specified range of years.
+        Glob patterns can be used to limit this filter to specific history files.
+        
 
-        Only files whose paths also match ``glob_patterns`` are considered for
-        filtering.  The representative year is the midpoint of the first time bound,
-        or the first time value if no bounds are present.  Requires metadata to have
-        been loaded.
-
-        :param start_year: First year in the range (inclusive).
-        :type start_year: int
-        :param end_year: Last year in the range (inclusive).
-        :type end_year: int
-        :param glob_patterns: Glob patterns restricting which files are subject to
-            the year filter. Defaults to ``['*']`` (all files).
-        :type glob_patterns: list[str]
-        :returns: New ``HFCollection`` containing only files within the year range.
-        :rtype: HFCollection
+        :param start_year: First year in range.
+        :param end_year: Last year in range.
+        :param glob_patterns: Glob patterns to match history files that recieve this filter.
         """
         self.check_pulled()
-        filtered_path_map = {}
+        filtered_path_map = self.__hf_to_meta_map
         remove_paths = []
         for pattern in glob_patterns:
-            for path in self.__hf_to_meta_map:
+            for path in filtered_path_map:
                 if fnmatch.fnmatch(path, pattern):
-                    meta_ds = self.__hf_to_meta_map[path]
+                    meta_ds = filtered_path_map[path]
                     if meta_ds.get_cftime_bounds() is not None:
-                        time_bnds = meta_ds.get_cftime_bounds()[0]
-                        time = time_bnds[0] + ((time_bnds[1] - time_bnds[0]) / 2)
+                        avg_year = np.mean([ts.year for ts in meta_ds.get_cftime_bounds()[0]])
                     else:
-                        time = meta_ds.get_cftimes()[0]
+                        avg_year = np.mean([ts.year for ts in meta_ds.get_cftimes()])
                     
-                    if start_year <= time.year <= end_year:
-                        filtered_path_map[path] = self.__hf_to_meta_map[path]
+                    if not start_year <= avg_year <= end_year:
+                        remove_paths.append(path)
+
+        for path in remove_paths:
+            del filtered_path_map[path]
 
         logger.debug(f"Filtered from {start_year} to {end_year} applied to following glob patterns: '{glob_patterns}'")
-        hf_groups = None
-        if self.__hf_groups is not None:
-            hf_groups = sort_hf_groups(list(filtered_path_map.keys()))
-
-        return self.copy(meta_map=filtered_path_map, hf_groups=hf_groups)
+        return self.copy(meta_map=filtered_path_map)
 
     def get_groups(self, check_fragmented=True):
         """
-        Returns the dictionary of history file groups.
+        Returns history file groupings.
 
-        On the first call, groups are built by :func:`sort_hf_groups`.  If
-        ``check_fragmented`` is ``True``, spatially tiled groups are additionally
-        merged via :func:`merge_fragmented_groups`.  Subsequent calls return the
-        cached result.
-
-        :param check_fragmented: If ``True`` (default), detect and merge spatially
-            fragmented file groups.
-        :type check_fragmented: bool
-        :returns: Dictionary mapping group ID strings to lists of history file paths.
-        :rtype: dict[str, list[pathlib.Path]]
+        :param check_fragmented: Checks if any of the history files are spatially fragmented/tiled.
+        :return: Dictionary containing group ID (key) and history file metadatas (value).
         """
         if self.__hf_groups is None:
+            self.check_pulled()
             self.__hf_groups = sort_hf_groups(list(self.__hf_to_meta_map.keys()))
         
-            if check_fragmented:
-                self.check_pulled()
-                self.__hf_groups = merge_fragmented_groups(self.__hf_groups, self.__hf_to_meta_map)
+        if check_fragmented:
+            self.check_pulled()
+            self.__hf_groups = merge_fragmented_groups(self.__hf_groups, self.__hf_to_meta_map)
 
         return self.__hf_groups
 
-    def slice_groups(self, slice_size_years=10, start_year=0, pattern=None):
+    def slice_groups(self, slice_size_years=10, pattern=None):
         """
-        Returns a new collection with history file groups partitioned into time slices.
+        Slices history file groupings that match the glob pattern (if specified) into subsets by time.
 
-        For each group (optionally filtered by ``pattern``), determines the year
-        range via :func:`get_year_bounds`, computes slice boundaries via
-        :func:`calculate_year_slices`, and assigns each file to the appropriate
-        sub-group based on its midpoint year.  Sub-group keys are suffixed with
-        ``[sorting_pivot]<start>-<end>`` to carry the year range through to
-        :class:`~gents.timeseries.TSCollection`.
-
-        :param slice_size_years: Maximum width of each time slice in years.
-            Defaults to ``10``.
-        :type slice_size_years: int
-        :param start_year: Override for the starting year; set to ``0`` to begin
-            at the dataset's own minimum year. Defaults to ``0``.
-        :type start_year: int or None
-        :param pattern: ``fnmatch`` glob to restrict slicing to matching group IDs.
-            Defaults to ``None`` (all groups).
-        :type pattern: str or None
-        :returns: New ``HFCollection`` with sliced groups embedded.
-        :rtype: HFCollection
+        :param slice_size_years: Size of slices to make, in years.
+        :param pattern: Glob pattern to match history file grouping IDs to.
+        :return: New groupings that are subset into time periods specified by 'slice_size_years'
         """
         sliced_groups = {}
-        self.check_pulled()
 
         for group in self.get_groups():
             hf_paths = self.get_groups()[group]
@@ -902,18 +605,16 @@ class HFCollection:
                 continue
             
             if len(hf_paths) == 1:
-                sliced_groups[group] = hf_paths
                 warnings.warn("Cannot slice history file group of size 1.", RuntimeWarning)
                 continue
             else:
                 group_meta_map = {path: self.__hf_to_meta_map[path] for path in hf_paths}
                 
                 min_year, max_year = get_year_bounds(group_meta_map)
-                if start_year is not None:
-                    min_year = start_year
+                time_slices = calculate_year_slices(slice_size_years, min_year, max_year+1)
+                time_slices[0] = (min_year, time_slices[0][1])
+                time_slices[-1] = (time_slices[-1][0], max_year)
                 
-                time_slices = calculate_year_slices(slice_size_years, min_year, max_year)
-
                 hf_slices = {}
                 variable_set = None
                 for hf_path in hf_paths:
@@ -921,19 +622,19 @@ class HFCollection:
         
                     if meta_ds.get_cftime_bounds() is not None:
                         time_bnds = meta_ds.get_cftime_bounds()[0]
-                        time = time_bnds[0] + ((time_bnds[1] - time_bnds[0]) / 2)
+                        time = time_bnds[0] + (time_bnds[1] - time_bnds[0]) / 2
                     else:
                         time = meta_ds.get_cftimes()[0]
                     
                     for time_slice in time_slices:
                         if time_slice[0] <= time.year <= time_slice[1]:
                             if time_slice in hf_slices:
-                                hf_slices[time_slice].append(hf_path)
+                                hf_slices[time_slice].append(meta_ds.get_path())
                             else:
-                                hf_slices[time_slice] = [hf_path]
+                                hf_slices[time_slice] = [meta_ds.get_path()]
                             break
-
+        
                 for time_slice in hf_slices:
-                    sliced_groups[f"{group}[sorting_pivot]{time_slice[0]}-{time_slice[1]}"] = hf_slices[time_slice]
+                    sliced_groups[f"{group}{time_slice[0]}-{time_slice[1]}"] = hf_slices[time_slice]
         logger.debug(f"Slicing groups into {slice_size_years} year long slices for '{pattern}'.")
         return self.copy(hf_groups=sliced_groups)

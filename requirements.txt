@@ -1,7 +1,4 @@
 numpy
 netcdf4
+dask[distributed]
 cftime
-pytest
-asv
-sphinx
-sphinx-autobuild
