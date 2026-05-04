@@ -104,7 +104,7 @@ class RealInfoProcessor:
                 self.bits_to_shave[variable] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[variable])
             
             tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[variable])
-            
+
             tmp_data = tmp_data.reshape(np.shape(input_data))
             return tmp_data, self.bits_to_shave[variable]
         else:

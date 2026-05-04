@@ -149,6 +149,9 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                 time_chunk_size = max(1, 4*(1024**2) // (np.prod(var_shape[1:]) * var_dtype.itemsize))
                 chunksizes = [time_chunk_size] + var_shape[1:]
 
+            # XXX: temporary hack as real info needs to process data on a snapshot basis
+            chunksizes[0] = 1
+
             var_data = ts_ds.createVariable(primary_var,
                                             var_dtype,
                                             var_dims,
@@ -163,8 +166,10 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
 
             bits_shaved = []
             if len(var_shape) > 0 and "time" in var_dims:
-                for i in range(0, var_shape[0], chunksizes[0]):
-                    end = min(i + chunksizes[0], var_shape[0])
+                #for i in range(0, var_shape[0], chunksizes[0]):
+                #    end = min(i + chunksizes[0], var_shape[0])
+                for i in range(0, var_shape[0]):
+                    end = i + 1
                     input_data = agg_hf_ds.get_var_vals(primary_var, time_index_start=i, time_index_end=end)
                     #var_data[i:end] = agg_hf_ds.get_var_vals(
                     #    primary_var, time_index_start=i, time_index_end=end
@@ -209,7 +214,7 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
     return ts_out_path
 
 
-def generate_time_series(hf_paths, ts_path_template, secondary_vars, ts_args):
+def generate_time_series(hf_paths, ts_path_template, secondary_vars, ts_args, real_info_processor):
     """
     Generates time-series files for a group of history files.
 
@@ -251,6 +256,7 @@ def generate_time_series(hf_paths, ts_path_template, secondary_vars, ts_args):
                 ts_out_path=ts_out_path,
                 primary_var=variable,
                 secondary_vars_data=secondary_vars_data,
+                real_info_processor=real_info_processor,
                 **args
             ))
     
@@ -306,7 +312,7 @@ class TSCollection:
     fluent API.
     """
 
-    def __init__(self, hf_collection, output_dir, ts_orders=None, num_processes=None, dask_client=None):
+    def __init__(self, hf_collection, output_dir, ts_orders=None, num_processes=None, dask_client=None, real_info_config_path=None):
         """
         Builds the time-series order list from a processed ``HFCollection``.
 
@@ -815,7 +821,8 @@ class TSCollection:
                     "hf_paths": init_order["hf_paths"],
                     "ts_path_template": init_order["ts_path_template"],
                     "secondary_vars": init_order["secondary_vars"],
-                    "ts_args": ts_args
+                    "ts_args": ts_args,
+                    "real_info_processor": self.__real_info_processor
                 })
         else:
             for index, order in enumerate(self.__orders):
@@ -829,7 +836,8 @@ class TSCollection:
                     "hf_paths": order["hf_paths"],
                     "ts_path_template": order["ts_path_template"],
                     "secondary_vars": order["secondary_vars"],
-                    "ts_args": ts_args
+                    "ts_args": ts_args,
+                    "real_info_processor": self.__real_info_processor
                 })
 
         with ProcessPoolExecutor(max_workers=self.__num_processes) as executor:
