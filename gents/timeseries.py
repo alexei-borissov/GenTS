@@ -175,6 +175,7 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                     #    primary_var, time_index_start=i, time_index_end=end
                     #)
                     var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
+                    bits_shaved.append(shaved)
             else:
                 #var_data[:] = agg_hf_ds.get_var_vals(primary_var)
                 input_data = agg_hf_ds.get_var_vals(primary_var)
