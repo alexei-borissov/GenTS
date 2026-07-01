@@ -174,14 +174,27 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                     #var_data[i:end] = agg_hf_ds.get_var_vals(
                     #    primary_var, time_index_start=i, time_index_end=end
                     #)
-                    var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
+                    var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, var_dims, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
+                    print(f"shaved bits for {primary_var} at time index {i}: {shaved}")
                     bits_shaved.append(shaved)
             else:
                 #var_data[:] = agg_hf_ds.get_var_vals(primary_var)
                 input_data = agg_hf_ds.get_var_vals(primary_var)
                 var_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, 0)
 
-            ts_ds[primary_var].setncattr("bits_shaved", np.asarray(bits_shaved, dtype=np.int32)) # Want to move this to a secondary variable rather than attribute.
+            #ts_ds[primary_var].setncattr("bits_shaved", np.asarray(bits_shaved, dtype=np.int32)) # Want to move this to a secondary variable rather than attribute.
+            bits_shaved = np.asarray(bits_shaved, dtype=np.int32)
+            bits_shaved_dim_names = ("bits_shaved_time","levels")
+            bits_shaved_dims = bits_shaved.shape
+            for index, dim in enumerate(bits_shaved_dim_names):
+                if dim not in ts_ds.dimensions:
+                    ts_ds.createDimension(dim, bits_shaved_dims[index])
+            bits_shaved_data = ts_ds.createVariable("bits_shaved",
+                                                    np.int32,
+                                                    bits_shaved_dim_names,
+                                                    complevel=complevel,
+                                                    compression=compression)
+            bits_shaved_data[:] = bits_shaved
 
         for secondary_var in secondary_vars_data:
             var_shape = agg_hf_ds.get_var_data_shape(secondary_var)
@@ -206,10 +219,10 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
             svar_data.set_always_mask(False)
 
             ts_ds[secondary_var].setncatts(agg_hf_ds.get_var_attrs(secondary_var))
-            #svar_data[:] = secondary_vars_data[secondary_var]
-            input_data = secondary_vars_data[secondary_var]
-            svar_data[:], bits_shaved = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var, 0)
-            ts_ds[secondary_var].setncattr("bits_shaved", np.int32(bits_shaved))
+            svar_data[:] = secondary_vars_data[secondary_var]
+            #input_data = secondary_vars_data[secondary_var]
+            #svar_data[:], _ = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var, var_dims, 0)
+            #ts_ds[secondary_var].setncattr("bits_shaved", np.int32(bits_shaved))
         
         ts_ds.setncatts(global_attrs | {"gents_version": str(get_version())})
     return ts_out_path
@@ -843,7 +856,7 @@ class TSCollection:
 
         with ProcessPoolExecutor(max_workers=self.__num_processes) as executor:
             futures = {executor.submit(generate_time_series, **args): args for args in optimized_orders}
-            prog_bar = ProgressBar(total=len(futures), label="Generating Timeseries")
+            #prog_bar = ProgressBar(total=len(futures), label="Generating Timeseries")
             for future in as_completed(futures):
                 try:
                     results.append(future.result())
@@ -852,9 +865,9 @@ class TSCollection:
                     logger.warning(f"Failed to load metadata for {path}: {exc}", exc_info=True)
                     if raise_errors:
                         raise
-                finally:
+                #finally:
                     # XXX: do we need to add the real_info_processor to the arguments list when generating timeseries? It was here before, but maybe needs to go elsewhere.
-                    prog_bar.step()
+                    # prog_bar.step()
         
         output_paths = []
         for result in results:
