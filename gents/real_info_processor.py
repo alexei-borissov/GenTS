@@ -45,6 +45,8 @@ class RealInfoProcessor:
                     self.real_info_per_variable[var_name] = var_tol
             self.real_info_eval_freq = config.get('real_info_eval_freq', 1)
             self.bits_to_shave = []
+            self.natural_order = []
+            self.permute_order = []
 
             #print(f"using real info: {self.real_info_flag}")
             #print(f"real info processor intialized with config: {config}")
@@ -71,6 +73,23 @@ class RealInfoProcessor:
             return issubclass(x, np.floating)
         except TypeError:
             return False
+
+    def get_natural_ordering(self, input_data):# -> np.ndarray:
+        """
+        Reorder the input data to longitude-major order. 
+        
+        :param input_data: Input data array
+        :return: indices that would sort the data in longitude-major order
+        """
+
+        lon = input_data.get_var_vals("lon")
+        lat = input_data.get_var_vals("lat")
+        lon_lat = zip(lon, lat)
+        self.natural_order = sorted(range(len(lon)), key=lambda i: (lon[i], lat[i]))
+        self.permute_order = [None] * len(self.natural_order)
+        for natural_index, original_index in enumerate(self.natural_order):
+            self.permute_order[original_index] = natural_index
+
     
     def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, dims: np.ndarray, timestep: int, time_chunk_size = 1) -> (np.ndarray, np.ndarray):
         """
@@ -86,6 +105,7 @@ class RealInfoProcessor:
         :param timestep: Current timestep
         :return: Shaved data array (or original data if shaving is disabled or data is non-float)
         """
+
         # If we're going to be shaving data it must be on a per-snapshot basis. 
         # Note: if parameter isn't passed, it is assumed a time-independent variable is passed in, hence no need to check.
         assert(time_chunk_size == 1) 
@@ -97,6 +117,9 @@ class RealInfoProcessor:
             level_index = dims.index("lev")
 
         result = np.zeros(np.shape(input_data), dtype=input_dtype)
+
+        if (len(self.natural_order) == 0):
+            self.get_natural_ordering(input_dataset)
 
         print(f"Processing variable '{variable}' at timestep {timestep} with level index {level_index} and dims {dims}")
         
@@ -119,6 +142,7 @@ class RealInfoProcessor:
                     subarray = input_data[tuple(idx)]
                     reshape_dims = subarray.shape
                     flat_array = np.asarray(subarray).flatten()
+                    flat_array = flat_array[self.natural_order]
                     
                     result[tuple(idx)] = flat_array.reshape(reshape_dims)
 
@@ -134,14 +158,16 @@ class RealInfoProcessor:
                     else:
                         self.bits_to_shave[-1][i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[-1][i])
                         print(f"1 variable {variable} timestep {timestep} level {i}: bits_to_shave={self.bits_to_shave[-1][i]}, tolerance={shave_tolerance}")
+                else:
+                    self.bits_to_shave[i] = self.bits_to_shave[-2]
             
                 print(f"2 variable {variable} timestep {timestep} level {i}: bits_to_shave={self.bits_to_shave[-1][i]}, tolerance={shave_tolerance}")
                 tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[-1][i])
 
                 if level_index == -1:
-                    result = tmp_data.reshape(reshape_dims)
+                    result = tmp_data[self.permute_order].reshape(reshape_dims)
                 else:
-                    result[tuple(idx)] = tmp_data.reshape(reshape_dims)
+                    result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
             print("bits shaved shape {bits_shaved.shape}")
             return result, np.asarray(self.bits_to_shave)
         else:
