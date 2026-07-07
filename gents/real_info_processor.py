@@ -23,7 +23,7 @@ class RealInfoProcessor:
     data while preserving real information based on a specified tolerance.
     """
     
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, n_bits_to_shave: Optional[int] = -1):
         """
         Initialize the RealInfoProcessor.
         
@@ -44,12 +44,11 @@ class RealInfoProcessor:
                     var_tol = var.get("real_info", self.real_info_tol)
                     self.real_info_per_variable[var_name] = var_tol
             self.real_info_eval_freq = config.get('real_info_eval_freq', 1)
+            self.n_bits_to_shave_default = n_bits_to_shave
             self.bits_to_shave = []
             self.natural_order = []
             self.permute_order = []
 
-            #print(f"using real info: {self.real_info_flag}")
-            #print(f"real info processor intialized with config: {config}")
         else:
             # Use provided parameters (backward compatibility)
             self.real_info_flag = False
@@ -91,7 +90,7 @@ class RealInfoProcessor:
             self.permute_order[original_index] = natural_index
 
     
-    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, dims: np.ndarray, timestep: int, time_chunk_size = 1) -> (np.ndarray, np.ndarray):
+    def shave_data(self, input_data: np.ndarray, input_dataset, variable: str, dims: np.ndarray, bits_shaved: np.ndarray, timestep: int, time_chunk_size = 1, n_bits_to_shave = -1) -> (np.ndarray, np.ndarray):
         """
         Apply real information-based bit shaving to input data.
         
@@ -121,16 +120,12 @@ class RealInfoProcessor:
         if (len(self.natural_order) == 0):
             self.get_natural_ordering(input_dataset)
 
-        print(f"Processing variable '{variable}' at timestep {timestep} with level index {level_index} and dims {dims}")
-        
         n_levels = 1 # Default to 1 if no level dimension is present
         if level_index != -1:
             n_levels = input_data.shape[level_index]
         if self.real_info_flag and self.is_float_type(input_dtype):
-            print(f"variable '{variable}' has {n_levels} levels input_data.shape={input_data.shape} level_index={level_index}")
-            self.bits_to_shave.append(np.zeros(n_levels, dtype = np.int32))
+            self.bits_to_shave = bits_shaved
             for i in range(n_levels):
-                print(f"1 Processing level {i} for variable '{variable}' at timestep {timestep} n_levels={n_levels}")
                 reshape_dims = input_data.shape
                 idx = []
                 if level_index == -1:
@@ -151,24 +146,21 @@ class RealInfoProcessor:
                 if variable in self.real_info_per_variable:
                     shave_tolerance = self.real_info_per_variable[variable]
 
-                print(f"variable {variable} timestep {timestep} level {i}")
-                if timestep % self.real_info_eval_freq == 0:
-                    if level_index == -1:
-                        self.bits_to_shave[-1][i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[-1][0])
-                    else:
-                        self.bits_to_shave[-1][i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[-1][i])
-                        print(f"1 variable {variable} timestep {timestep} level {i}: bits_to_shave={self.bits_to_shave[-1][i]}, tolerance={shave_tolerance}")
+                if self.n_bits_to_shave_default == -1:
+                    if timestep % self.real_info_eval_freq == 0:
+                        if level_index == -1:
+                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[0])
+                        else:
+                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[i])
                 else:
-                    self.bits_to_shave[i] = self.bits_to_shave[-2]
+                    self.bits_to_shave[i] = self.n_bits_to_shave_default
             
-                print(f"2 variable {variable} timestep {timestep} level {i}: bits_to_shave={self.bits_to_shave[-1][i]}, tolerance={shave_tolerance}")
-                tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[-1][i])
+                tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[i])
 
                 if level_index == -1:
                     result = tmp_data[self.permute_order].reshape(reshape_dims)
                 else:
                     result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
-            print("bits shaved shape {bits_shaved.shape}")
             return result, np.asarray(self.bits_to_shave)
         else:
             return input_data, [np.int32(0)]

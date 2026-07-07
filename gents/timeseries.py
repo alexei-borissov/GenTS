@@ -174,8 +174,15 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                     #var_data[i:end] = agg_hf_ds.get_var_vals(
                     #    primary_var, time_index_start=i, time_index_end=end
                     #)
-                    var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, var_dims, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
-                    print(f"shaved bits for {primary_var} at time index {i}: {shaved}")
+                    
+                    if i == 0:
+                        n_levels = 1
+                        for index, dim in enumerate(var_dims):
+                            if dim == "lev":
+                                n_levels = var_shape[index]
+                        shaved = np.zeros(n_levels, dtype= np.int32)
+
+                    var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, var_dims, shaved, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
                     bits_shaved.append(shaved)
             else:
                 #var_data[:] = agg_hf_ds.get_var_vals(primary_var)
@@ -326,7 +333,7 @@ class TSCollection:
     fluent API.
     """
 
-    def __init__(self, hf_collection, output_dir, ts_orders=None, num_processes=None, dask_client=None, real_info_config_path=None):
+    def __init__(self, hf_collection, output_dir, ts_orders=None, num_processes=None, dask_client=None, real_info_config_path=None, n_bits=-1):
         """
         Builds the time-series order list from a processed ``HFCollection``.
 
@@ -370,7 +377,7 @@ class TSCollection:
         self.__output_dir = output_dir
         
         self.__real_info_config_path = real_info_config_path
-        self.__real_info_processor = RealInfoProcessor(config_path=real_info_config_path)
+        self.__real_info_processor = RealInfoProcessor(config_path=real_info_config_path, n_bits_to_shave=n_bits)
         
         if ts_orders is None:
             self.__orders = list(self.update_ts_orders())
@@ -528,7 +535,7 @@ class TSCollection:
         if num_processes is None:
             num_processes = self.__num_processes
 
-        return TSCollection(hf_collection=hf_collection, output_dir=output_dir, ts_orders=ts_orders, num_processes=num_processes, real_info_config_path=self.__real_info_config_path)
+        return TSCollection(hf_collection=hf_collection, output_dir=output_dir, ts_orders=ts_orders, num_processes=num_processes, real_info_config_path=self.__real_info_config_path, n_bits=self.__real_info_processor.n_bits_to_shave_default)
 
     def include(self, path_glob, var_glob="*"):
         """
