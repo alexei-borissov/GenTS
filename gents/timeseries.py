@@ -227,9 +227,6 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
 
             ts_ds[secondary_var].setncatts(agg_hf_ds.get_var_attrs(secondary_var))
             svar_data[:] = secondary_vars_data[secondary_var]
-            #input_data = secondary_vars_data[secondary_var]
-            #svar_data[:], _ = real_info_processor.shave_data(input_data, agg_hf_ds, secondary_var, var_dims, 0)
-            #ts_ds[secondary_var].setncattr("bits_shaved", np.int32(bits_shaved))
         
         ts_ds.setncatts(global_attrs | {"gents_version": str(get_version())})
     return ts_out_path

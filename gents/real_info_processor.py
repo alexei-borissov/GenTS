@@ -73,16 +73,16 @@ class RealInfoProcessor:
         except TypeError:
             return False
 
-    def get_natural_ordering(self, input_data):# -> np.ndarray:
+    def get_natural_ordering(self, input_data, dataset):# -> np.ndarray:
         """
         Reorder the input data to longitude-major order. 
         
-        :param input_data: Input data array
+        :param dataset: Input data array
         :return: indices that would sort the data in longitude-major order
         """
 
-        lon = input_data.get_var_vals("lon")
-        lat = input_data.get_var_vals("lat")
+        lon = dataset.get_var_vals("lon")
+        lat = dataset.get_var_vals("lat")
         lon_lat = zip(lon, lat)
         self.natural_order = sorted(range(len(lon)), key=lambda i: (lon[i], lat[i]))
         self.permute_order = [None] * len(self.natural_order)
@@ -118,7 +118,7 @@ class RealInfoProcessor:
         result = np.zeros(np.shape(input_data), dtype=input_dtype)
 
         if (len(self.natural_order) == 0):
-            self.get_natural_ordering(input_dataset)
+            self.get_natural_ordering(input_data, input_dataset)
 
         n_levels = 1 # Default to 1 if no level dimension is present
         if level_index != -1:
@@ -130,6 +130,7 @@ class RealInfoProcessor:
                 idx = []
                 if level_index == -1:
                     flat_array = np.asarray(input_data).flatten()
+                    flat_array = flat_array[self.natural_order]
                 else:
                     # extract a flattened array of the i-th level.
                     idx = [slice(None)] * input_data.ndim
@@ -158,8 +159,11 @@ class RealInfoProcessor:
                 tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[i])
 
                 if level_index == -1:
+                    print(f"reshaping with level index -1, reshape dims {reshape_dims}, input_data shape {input_data.shape}")
                     result = tmp_data[self.permute_order].reshape(reshape_dims)
+                    #result = tmp_data.reshape(reshape_dims)
                 else:
+                    print(f"reshaping with level index {level_index} reshape dims {reshape_dims}, tuple idx {tuple(idx)}")
                     result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
             return result, np.asarray(self.bits_to_shave)
         else:
