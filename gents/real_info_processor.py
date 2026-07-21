@@ -155,6 +155,8 @@ class RealInfoProcessor:
                             self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[i])
                 else:
                     self.bits_to_shave[i] = self.n_bits_to_shave_default
+                # XXX: Hack, limit the number of bits to shave to 15
+                self.bits_to_shave[i] = min(self.bits_to_shave[i], 15)
             
                 tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[i])
 
