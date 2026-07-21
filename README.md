@@ -89,11 +89,12 @@ from gents.timeseries import TSCollection
 if __name__ == "__main__":
     input_head_dir = "... case directory with model output ..."
     output_head_dir = "... scratch directory to output time series to ..."
+    real_info_config = "... path to real information config yaml file ..."
 
     hf_collection = HFCollection(input_head_dir, num_processes=64)
     hf_collection = hf_collection.include(["*/atm/*", "*/ocn/*", "*.h4.*"])
 
-    ts_collection = TSCollection(hf_collection.include_years(0, 5), output_head_dir, num_processes=32)
+    ts_collection = TSCollection(hf_collection.include_years(0, 5), output_head_dir, num_processes=32, real_info_config_path=real_info_config)
     ts_collection = ts_collection.apply_overwrite("*")
     ts_collection.execute()
 ```
