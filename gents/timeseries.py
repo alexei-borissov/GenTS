@@ -183,6 +183,9 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                         shaved = np.zeros(n_levels, dtype= np.int32)
 
                     var_data[i:end], shaved = real_info_processor.shave_data(input_data, agg_hf_ds, primary_var, var_dims, shaved, i, end - i) # XXX: check what happens to shaved bits. should be concattenated to an array of length of timesteps.
+                    if shaved.all() == -1:
+                        print(f"Error: Shaving failed for variable {primary_var} at time index {i}.")
+                        continue
                     bits_shaved.append(shaved)
             else:
                 #var_data[:] = agg_hf_ds.get_var_vals(primary_var)

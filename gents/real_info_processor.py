@@ -11,8 +11,20 @@ from pathlib import Path
 from typing import Any, Optional
 
 # Add path to access the real_info module from real-information package
-sys.path.insert(1, str(Path(__file__).parent.parent.parent / 'real-information' / 'src'))
+sys.path.insert(1, str(Path(__file__).parent.parent.parent / 'install' / 'real-info'))
 import real_info
+
+def prod(iterable):
+    """
+    Compute the product of elements in an iterable.
+    
+    :param iterable: An iterable of numbers
+    :return: The product of the numbers
+    """
+    result = 1
+    for x in iterable:
+        result *= x
+    return result
 
 
 class RealInfoProcessor:
@@ -140,6 +152,9 @@ class RealInfoProcessor:
                     flat_array = np.asarray(subarray).flatten()
                     flat_array = flat_array[self.natural_order]
                     
+                    if (prod(reshape_dims) != len(flat_array)):
+                        print(f"Error 1: reshape_dims {reshape_dims} does not match length of flat_array {len(flat_array)} for variable {variable} at level {i}.")
+                        return input_data, -1
                     result[tuple(idx)] = flat_array.reshape(reshape_dims)
 
                 shave_tolerance = self.real_info_tol
@@ -159,11 +174,15 @@ class RealInfoProcessor:
                 tmp_data = real_info.shave(flat_array, len(flat_array), self.bits_to_shave[i])
 
                 if level_index == -1:
-                    print(f"reshaping with level index -1, reshape dims {reshape_dims}, input_data shape {input_data.shape}")
+                    if (prod(reshape_dims) != len(tmp_data)):
+                        print(f"Error 2: reshape_dims {reshape_dims} does not match length of tmp_data {len(tmp_data)} for variable {variable}.")
+                        return input_data, -1
                     result = tmp_data[self.permute_order].reshape(reshape_dims)
                     #result = tmp_data.reshape(reshape_dims)
                 else:
-                    print(f"reshaping with level index {level_index} reshape dims {reshape_dims}, tuple idx {tuple(idx)}")
+                    if (prod(reshape_dims) != len(tmp_data)):
+                        print(f"Error 3: reshape_dims {reshape_dims} does not match length of tmp_data {len(tmp_data)} for variable {variable} at level {i}.")
+                        return input_data, -1
                     result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
             return result, np.asarray(self.bits_to_shave)
         else:
