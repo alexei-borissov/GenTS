@@ -134,6 +134,7 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
 
     with GenTSDataStore(ts_out_path, mode="w") as ts_ds:
         if primary_var != "auxiliary":
+            logger.info(f"Writing time-series file for primary variable '{primary_var}'...")
             var_shape = agg_hf_ds.get_var_data_shape(primary_var)
             var_dims = agg_hf_ds.get_var_dimensions(primary_var)
             for index, dim in enumerate(var_dims):
@@ -179,6 +180,8 @@ def write_timeseries_file(agg_hf_ds, ts_out_path, primary_var, secondary_vars_da
                         n_levels = 1
                         for index, dim in enumerate(var_dims):
                             if dim == "lev":
+                                n_levels = var_shape[index]
+                            elif dim == "ilev":
                                 n_levels = var_shape[index]
                         shaved = np.zeros(n_levels, dtype= np.int32)
 

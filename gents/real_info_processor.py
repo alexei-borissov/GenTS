@@ -56,6 +56,7 @@ class RealInfoProcessor:
                     var_tol = var.get("real_info", self.real_info_tol)
                     self.real_info_per_variable[var_name] = var_tol
             self.real_info_eval_freq = config.get('real_info_eval_freq', 1)
+            self.use_natural_ordering = config.get('use_natural_ordering', True)
             self.n_bits_to_shave_default = n_bits_to_shave
             self.bits_to_shave = []
             self.natural_order = []
@@ -65,6 +66,7 @@ class RealInfoProcessor:
             # Use provided parameters (backward compatibility)
             self.real_info_flag = False
             self.real_info_tol =  0.99
+            self.use_natural_ordering = True
     
     @staticmethod
     def is_float_type(x: Any) -> bool:
@@ -126,10 +128,12 @@ class RealInfoProcessor:
         level_index = -1
         if "lev" in dims:
             level_index = dims.index("lev")
+        elif "ilev" in dims:
+            level_index = dims.index("ilev")
 
         result = np.zeros(np.shape(input_data), dtype=input_dtype)
 
-        if (len(self.natural_order) == 0):
+        if self.use_natural_ordering and (len(self.natural_order) == 0):
             self.get_natural_ordering(input_data, input_dataset)
 
         n_levels = 1 # Default to 1 if no level dimension is present
@@ -142,7 +146,8 @@ class RealInfoProcessor:
                 idx = []
                 if level_index == -1:
                     flat_array = np.asarray(input_data).flatten()
-                    flat_array = flat_array[self.natural_order]
+                    if self.use_natural_ordering:
+                        flat_array = flat_array[self.natural_order]
                 else:
                     # extract a flattened array of the i-th level.
                     idx = [slice(None)] * input_data.ndim
@@ -150,7 +155,8 @@ class RealInfoProcessor:
                     subarray = input_data[tuple(idx)]
                     reshape_dims = subarray.shape
                     flat_array = np.asarray(subarray).flatten()
-                    flat_array = flat_array[self.natural_order]
+                    if self.use_natural_ordering:
+                        flat_array = flat_array[self.natural_order]
                     
                     if (prod(reshape_dims) != len(flat_array)):
                         print(f"Error 1: reshape_dims {reshape_dims} does not match length of flat_array {len(flat_array)} for variable {variable} at level {i}.")
@@ -177,13 +183,18 @@ class RealInfoProcessor:
                     if (prod(reshape_dims) != len(tmp_data)):
                         print(f"Error 2: reshape_dims {reshape_dims} does not match length of tmp_data {len(tmp_data)} for variable {variable}.")
                         return input_data, -1
-                    result = tmp_data[self.permute_order].reshape(reshape_dims)
-                    #result = tmp_data.reshape(reshape_dims)
+                    if self.use_natural_ordering:
+                        result = tmp_data[self.permute_order].reshape(reshape_dims)
+                    else:
+                        result = tmp_data.reshape(reshape_dims)
                 else:
                     if (prod(reshape_dims) != len(tmp_data)):
                         print(f"Error 3: reshape_dims {reshape_dims} does not match length of tmp_data {len(tmp_data)} for variable {variable} at level {i}.")
                         return input_data, -1
-                    result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
+                    if self.use_natural_ordering:
+                        result[tuple(idx)] = tmp_data[self.permute_order].reshape(reshape_dims)
+                    else:
+                        result[tuple(idx)] = tmp_data.reshape(reshape_dims)
             return result, np.asarray(self.bits_to_shave)
         else:
             return input_data, [np.int32(0)]
