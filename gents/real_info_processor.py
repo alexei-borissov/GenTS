@@ -61,12 +61,15 @@ class RealInfoProcessor:
             self.bits_to_shave = []
             self.natural_order = []
             self.permute_order = []
+            # remember config path for passing to underlying real-info C library
+            self.real_info_config_path = config_path
 
         else:
             # Use provided parameters (backward compatibility)
             self.real_info_flag = False
             self.real_info_tol =  0.99
             self.use_natural_ordering = True
+            self.real_info_config_path = None
     
     @staticmethod
     def is_float_type(x: Any) -> bool:
@@ -171,9 +174,9 @@ class RealInfoProcessor:
                 if self.n_bits_to_shave_default == -1:
                     if timestep % self.real_info_eval_freq == 0:
                         if level_index == -1:
-                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[0])
+                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[0], self.real_info_config_path)
                         else:
-                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[i])
+                            self.bits_to_shave[i] = real_info.pick_bits_to_shave_binary_search( flat_array, len(flat_array), shave_tolerance, self.bits_to_shave[i], self.real_info_config_path)
                 else:
                     self.bits_to_shave[i] = self.n_bits_to_shave_default
                 # XXX: Hack, limit the number of bits to shave to 15
